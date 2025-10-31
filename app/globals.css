@@ -6,11 +6,25 @@
 }
 
 @theme inline {
+  /* existing: background/foreground + fonts */
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+
+  /* brand & UI scales (tweak as you like) */
+  --color-brand: #2563eb;        /* Tailwind-ish blue-600 */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+
+  /* breakpoints (mobile-first) */
+  --breakpoint-sm: 360px;  /* phones */
+  --breakpoint-md: 768px;  /* big phones / small tablets */
+  --breakpoint-lg: 1024px; /* laptops */
+  --breakpoint-xl: 1280px; /* desktops */
 }
+
 
 @media (prefers-color-scheme: dark) {
   :root {
