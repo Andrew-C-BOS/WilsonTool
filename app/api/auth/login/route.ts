@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import { findUserByEmail, verifyPassword, createSession } from "@/lib/auth";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+
 export async function POST(req: Request) {
   const { email, password } = await req.json();
   if (!email || !password) return NextResponse.json({ ok: false, error: "Missing credentials" }, { status: 400 });
