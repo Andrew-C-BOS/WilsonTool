@@ -1,25 +1,26 @@
+// app/api/auth/logout/route.ts
 import { NextResponse } from "next/server";
 
 const COOKIE = "milo_auth";
 
 export async function POST() {
-  // Build a response and clear the cookie on that response
   const res = NextResponse.json({ ok: true });
 
-  // Overwrite with an immediate-expiry cookie (most robust)
+  // Overwrite the cookie with an immediate expiry (authoritative way to clear)
   res.cookies.set({
     name: COOKIE,
     value: "",
-    path: "/",
     httpOnly: true,
     sameSite: "lax",
     secure: process.env.NODE_ENV === "production",
-    maxAge: 0,                 // expire now
-    expires: new Date(0),      // belt-and-suspenders
+    path: "/",
+    maxAge: 0,
+    expires: new Date(0),
   });
 
-  // Also call delete (handles some edge cases with duplicates)
-  res.cookies.delete(COOKIE, { path: "/" });
+  // Optional: delete by name (no options param in Next 16)
+  // This is safe to keep or remove — the set() above already clears it.
+  res.cookies.delete(COOKIE);
 
   return res;
 }
