@@ -32,4 +32,9 @@ export async function createAllIndexes() {
 
   // audit
   await db.collection("audit_log").createIndex({ orgId: 1, "entity.type": 1, "entity.id": 1, at: -1 }, { name: "audit_entity" });
+  
+  //forms
+  await db.collection("application_forms").createIndex({ name: 1 }, { name: "by_name" });
+  await db.collection("application_forms").createIndex({ updatedAt: -1 }, { name: "by_updated" });
+
 }

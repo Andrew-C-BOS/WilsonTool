@@ -38,3 +38,26 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+@layer base {
+  /* Make all body text darker by default */
+  body {
+    @apply text-gray-900 antialiased;
+  }
+
+  /* Ensure form labels, descriptions, etc., inherit stronger color */
+  p, li, label, small, span, input, textarea, select {
+    @apply text-pink-600;
+  }
+
+  /* Placeholders stay lighter */
+  input::placeholder,
+  textarea::placeholder {
+    @apply text-gray-500;
+  }
+
+  /* Headings are fully black */
+  h1, h2, h3, h4, h5, h6 {
+    @apply text-gray-900;
+  }
+}
