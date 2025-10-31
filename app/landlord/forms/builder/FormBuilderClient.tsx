@@ -112,8 +112,25 @@ const DEFAULT_SECTIONS: FormSection[] = [
 ];
 
 const DEFAULT_QUALS: Qualification[] = [
-  { id: uid(), title: "Government ID", audience: ["primary", "co_applicant"], requirement: "required", mode: "either", docKind: "government_id", notes: "Driver’s license, passport, state ID," },
-  { id: uid(), title: "Credit report", audience: ["primary", "co_applicant", "cosigner"], requirement: "required", mode: "either", docKind: "credit_report", integration: { provider: "TransUnion", type: "credit" } },
+  {
+    id: uid(),
+    title: "Government ID",
+    audience: ["primary", "co_applicant"],
+    requirement: "required",
+    mode: "either",
+    docKind: "government_id",
+    notes: "Driver’s license, passport, state ID,",
+    integration: { provider: "Persona", type: "identity" } as const,   // ⬅️ here
+  },
+  {
+    id: uid(),
+    title: "Credit report",
+    audience: ["primary", "co_applicant", "cosigner"],
+    requirement: "required",
+    mode: "either",
+    docKind: "credit_report",
+    integration: { provider: "TransUnion", type: "credit" } as const,   // ⬅️ and here
+  },
 ];
 
 /* ──────────────────────────────────────────────────────────────────────────────
@@ -198,24 +215,41 @@ export default function FormBuilderClient() {
   }
 
   /* ─── Qualifications ─── */
-  function addQualification(kind: "id" | "credit" | "income") {
-    const base =
-      kind === "id"
-        ? { title: "Government ID", docKind: "government_id", mode: "either" as const, integration: { provider: "Persona", type: "identity" as const } }
-        : kind === "credit"
-        ? { title: "Credit report", docKind: "credit_report", mode: "either" as const, integration: { provider: "TransUnion", type: "credit" as const } }
-        : { title: "Income verification", docKind: "income_docs", mode: "either" as const, integration: { provider: "Plaid", type: "income" as const } };
-    const q: Qualification = {
-      id: uid(),
-      title: base.title,
-      audience: ["primary", "co_applicant", "cosigner"],
-      requirement: "required",
-      mode: base.mode,
-      docKind: base.docKind,
-      integration: base.integration,
-    };
-    setForm(f => ({ ...f, qualifications: [...f.qualifications, q] }));
-  }
+function addQualification(kind: "id" | "credit" | "income") {
+  const base =
+    kind === "id"
+      ? {
+          title: "Government ID",
+          docKind: "government_id",
+          mode: "either" as const,
+          integration: { provider: "Persona", type: "identity" } as const, // ⬅️ keep literals
+        }
+      : kind === "credit"
+      ? {
+          title: "Credit report",
+          docKind: "credit_report",
+          mode: "either" as const,
+          integration: { provider: "TransUnion", type: "credit" } as const, // ⬅️
+        }
+      : {
+          title: "Income verification",
+          docKind: "income_docs",
+          mode: "either" as const,
+          integration: { provider: "Plaid", type: "income" } as const, // ⬅️
+        };
+
+  const q: Qualification = {
+    id: uid(),
+    title: base.title,
+    audience: ["primary", "co_applicant", "cosigner"],
+    requirement: "required",
+    mode: base.mode,
+    docKind: base.docKind,
+    integration: base.integration, // now satisfies the union
+  };
+  setForm((f) => ({ ...f, qualifications: [...f.qualifications, q] }));
+}
+
   function updateQualification(id: string, patch: Partial<Qualification>) {
     setForm(f => ({ ...f, qualifications: f.qualifications.map(x => x.id === id ? { ...x, ...patch } : x) }));
   }
