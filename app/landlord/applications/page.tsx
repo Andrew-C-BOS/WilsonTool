@@ -1,4 +1,7 @@
-// app/landlord/applications/page.tsx
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0; // explicitly opt out of SSG/ISR
+
 import { Suspense } from "react";
 import ApplicationsClient from "./ApplicationsClient";
 

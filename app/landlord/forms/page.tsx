@@ -1,4 +1,8 @@
 // app/landlord/forms/page.tsx
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 import { Suspense } from "react";
 import ManageFormsClient from "./ManageFormsClient";
 

@@ -8,29 +8,32 @@ export const dynamic = "force-dynamic";
 
 export async function GET(
   _req: NextRequest,
-  context: { params: Promise<{ id: string }> } // ← typed-routes passes a Promise
+  context: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { id } = await context.params; // ← await it
+    const { id } = await context.params;
     const db = await getDb();
-
-    // Handle both ObjectId and string ids
     const { ObjectId } = await import("mongodb");
-    const isObjId = /^[0-9a-fA-F]{24}$/.test(id);
 
-    const query = isObjId ? { _id: new ObjectId(id) } : { _id: id };
-    let doc = await db.collection("application_forms").findOne(query);
+    const col = db.collection("application_forms");
 
-    // (Optional) If you store a separate "id" field, try that next
-    if (!doc && !isObjId) {
-      doc = await db.collection("application_forms").findOne({ id });
+    // Query in two branches to satisfy types
+    let doc: any = null;
+
+    if (/^[0-9a-fA-F]{24}$/.test(id)) {
+      // Only try ObjectId when it looks like one
+      doc = await col.findOne({ _id: new ObjectId(id) });
+    } else {
+      // Try a string _id first if you ever stored it that way
+      doc = await col.findOne({ _id: id as any });
+      // Or your logical "id" field (common in apps)
+      if (!doc) doc = await col.findOne({ id });
     }
 
     if (!doc) {
       return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 });
     }
 
-    // Normalize id for the client
     const form = { ...doc, id: String(doc._id ?? doc.id) };
     return NextResponse.json({ ok: true, form });
   } catch (e: any) {

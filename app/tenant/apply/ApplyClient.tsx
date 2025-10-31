@@ -419,52 +419,57 @@ export default function ApplyClient() {
     );
   }
 
-  function QualificationsScreen() {
-    const visible = (form.qualifications || []).filter(q => q.audience.includes(role));
-    return (
-      <div className="mx-auto w-full max-w-md p-4">
-        <h2 className="text-lg font-semibold text-gray-900">Qualifications</h2>
-        <p className="mt-1 text-sm text-gray-600">
-          Upload required documents now, or save and finish later,
-        </p>
+function QualificationsScreen({ f }: { f: ApplicationForm }) {
+  const visible = (f.qualifications ?? []).filter(q => q.audience.includes(role));
 
-        <div className="mt-4 space-y-3">
-          {visible.map((q) => (
-            <div key={q.id} className="rounded-lg border border-gray-200 p-3">
-              <div className="flex items-center justify-between">
-                <div className="text-sm font-medium text-gray-900">{q.title}</div>
-                <span className={clsx(
-                  "text-[11px] rounded-full px-2 py-0.5 ring-1 ring-inset",
-                  q.requirement === "required" ? "bg-rose-50 text-rose-700 ring-rose-200" : "bg-gray-100 text-gray-700 ring-gray-200"
-                )}>
-                  {q.requirement}
-                </span>
-              </div>
-              {q.notes && <div className="mt-1 text-xs text-gray-600">{q.notes}</div>}
-              <div className="mt-2">
-                <input
-                  ref={(el) => { (fileInputs.current as any)[q.id] = el; }}
-                  type="file"
-                  multiple
-                  onChange={(e) => onFilesChange(q.id, e.target.files)}
-                  className="block w-full text-sm text-gray-900 file:mr-3 file:rounded-md file:border file:border-gray-300 file:bg-white file:px-3 file:py-1.5 file:text-sm hover:file:bg-gray-50"
-                />
-                {files[q.id]?.length ? (
-                  <ul className="mt-2 list-disc pl-5 text-xs text-gray-700">
-                    {files[q.id].map((f, i) => <li key={i}>{f.name}</li>)}
-                  </ul>
-                ) : (
-                  <p className="mt-1 text-xs text-gray-500">No files attached yet,</p>
-                )}
-              </div>
+  return (
+    <div className="mx-auto w-full max-w-md p-4">
+      <h2 className="text-lg font-semibold text-gray-900">Qualifications</h2>
+      <p className="mt-1 text-sm text-gray-600">
+        Upload required documents now, or save and finish later,
+      </p>
+
+      <div className="mt-4 space-y-3">
+        {visible.map((q) => (
+          <div key={q.id} className="rounded-lg border border-gray-200 p-3">
+            <div className="flex items-center justify-between">
+              <div className="text-sm font-medium text-gray-900">{q.title}</div>
+              <span
+                className={
+                  "text-[11px] rounded-full px-2 py-0.5 ring-1 ring-inset " +
+                  (q.requirement === "required"
+                    ? "bg-rose-50 text-rose-700 ring-rose-200"
+                    : "bg-gray-100 text-gray-700 ring-gray-200")
+                }
+              >
+                {q.requirement}
+              </span>
             </div>
-          ))}
-          {visible.length === 0 && (
-            <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">
-              No documents required for your role,
+            {q.notes && <div className="mt-1 text-xs text-gray-600">{q.notes}</div>}
+            <div className="mt-2">
+              <input
+                ref={(el) => { (fileInputs.current as any)[q.id] = el; }}
+                type="file"
+                multiple
+                onChange={(e) => onFilesChange(q.id, e.target.files)}
+                className="block w-full text-sm text-gray-900 file:mr-3 file:rounded-md file:border file:border-gray-300 file:bg-white file:px-3 file:py-1.5 file:text-sm hover:file:bg-gray-50"
+              />
+              {files[q.id]?.length ? (
+                <ul className="mt-2 list-disc pl-5 text-xs text-gray-700">
+                  {files[q.id].map((f, i) => <li key={i}>{f.name}</li>)}
+                </ul>
+              ) : (
+                <p className="mt-1 text-xs text-gray-500">No files attached yet,</p>
+              )}
             </div>
-          )}
-        </div>
+          </div>
+        ))}
+        {visible.length === 0 && (
+          <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">
+            No documents required for your role,
+          </div>
+        )}
+      </div>
 
         <div className="h-16" />
         {/* Sticky nav */}
@@ -493,27 +498,34 @@ export default function ApplyClient() {
     );
   }
 
-  function ReviewScreen() {
-    const bySection = useMemo(() => {
-      const map: Record<string, { title: string; items: { label: string; value: any }[] }> = {};
-      for (const s of form.sections) map[s.id] = { title: s.title, items: [] };
-      for (const q of form.questions) {
-        if (!q.showForRoles.includes(role)) continue;
-        const v = answers[q.id];
-        (map[q.sectionId]?.items || (map[q.sectionId] = { title: q.sectionId, items: [] }).items).push({
-          label: q.label,
-          value: v === undefined || v === null || v === "" ? "—" : Array.isArray(v) ? v.join(", ") : String(v),
-        });
-      }
-      return map;
-    }, [form, answers, role]);
+function ReviewScreen({ f }: { f: ApplicationForm }) {
+  const bySection = useMemo(() => {
+    const map: Record<string, { title: string; items: { label: string; value: any }[] }> = {};
+    for (const s of f.sections) map[s.id] = { title: s.title, items: [] };
+    for (const q of f.questions) {
+      if (!q.showForRoles.includes(role)) continue;
+      const v = answers[q.id];
+      (map[q.sectionId]?.items || (map[q.sectionId] = { title: q.sectionId, items: [] }).items).push({
+        label: q.label,
+        value:
+          v === undefined || v === null || v === ""
+            ? "—"
+            : Array.isArray(v)
+            ? v.join(", ")
+            : String(v),
+      });
+    }
+    return map;
+  }, [f, answers, role]);
 
-    return (
-      <div className="mx-auto w-full max-w-md p-4">
-        <h2 className="text-lg font-semibold text-gray-900">Review & submit</h2>
-        <p className="mt-1 text-sm text-gray-600">Double‑check details below, upload missing documents if needed,</p>
+  return (
+    <div className="mx-auto w-full max-w-md p-4">
+      <h2 className="text-lg font-semibold text-gray-900">Review & submit</h2>
+      <p className="mt-1 text-sm text-gray-600">
+        Double-check details below, upload missing documents if needed,
+      </p>
 
-        <div className="mt-4 space-y-4">
+      <div className="mt-4 space-y-4">
           <div className="rounded-lg border border-gray-200 p-3">
             <div className="text-sm font-medium text-gray-900">Your info</div>
             <div className="mt-2 text-sm text-gray-700">
@@ -523,41 +535,46 @@ export default function ApplyClient() {
             </div>
           </div>
 
-          {Object.entries(bySection).map(([secId, group]) => (
-            <div key={secId} className="rounded-lg border border-gray-200 p-3">
-              <div className="text-sm font-medium text-gray-900">{group.title}</div>
-              <dl className="mt-2">
-                {group.items.map((it, i) => (
-                  <div key={i} className="grid grid-cols-3 gap-2 py-1">
-                    <dt className="col-span-1 text-xs text-gray-500">{it.label}</dt>
-                    <dd className="col-span-2 text-sm text-gray-900">{it.value}</dd>
-                  </div>
-                ))}
-              </dl>
-              <button
-                onClick={() => { const idx = form.sections.findIndex(s => s.id === secId); if (idx >= 0) { setSecIndex(idx); setStage("sections"); } }}
-                className="mt-2 text-xs text-gray-700 underline"
-              >
-                Edit section
-              </button>
-            </div>
-          ))}
-
-          <div className="rounded-lg border border-gray-200 p-3">
-            <div className="text-sm font-medium text-gray-900">Documents</div>
-            {form.qualifications.filter(q => q.audience.includes(role)).map(q => (
-              <div key={q.id} className="mt-2">
-                <div className="text-xs text-gray-600">{q.title}</div>
-                <div className="text-sm text-gray-900">
-                  {(files[q.id]?.length ?? 0) > 0 ? `${files[q.id].length} file(s) attached` : "No files"}
+     {Object.entries(bySection).map(([secId, group]) => (
+          <div key={secId} className="rounded-lg border border-gray-200 p-3">
+            <div className="text-sm font-medium text-gray-900">{group.title}</div>
+            <dl className="mt-2">
+              {group.items.map((it, i) => (
+                <div key={i} className="grid grid-cols-3 gap-2 py-1">
+                  <dt className="col-span-1 text-xs text-gray-500">{it.label}</dt>
+                  <dd className="col-span-2 text-sm text-gray-900">{it.value}</dd>
                 </div>
-              </div>
-            ))}
-            <button onClick={() => setStage("quals")} className="mt-2 text-xs text-gray-700 underline">
-              Manage documents
+              ))}
+            </dl>
+            <button
+              onClick={() => {
+                const idx = f.sections.findIndex((s) => s.id === secId);
+                if (idx >= 0) { setSecIndex(idx); setStage("sections"); }
+              }}
+              className="mt-2 text-xs text-gray-700 underline"
+            >
+              Edit section
             </button>
           </div>
+        ))}
+
+        <div className="rounded-lg border border-gray-200 p-3">
+          <div className="text-sm font-medium text-gray-900">Documents</div>
+          {f.qualifications.filter((q) => q.audience.includes(role)).map((q) => (
+            <div key={q.id} className="mt-2">
+              <div className="text-xs text-gray-600">{q.title}</div>
+              <div className="text-sm text-gray-900">
+                {(files[q.id]?.length ?? 0) > 0
+                  ? `${files[q.id].length} file(s) attached`
+                  : "No files"}
+              </div>
+            </div>
+          ))}
+          <button onClick={() => setStage("quals")} className="mt-2 text-xs text-gray-700 underline">
+            Manage documents
+          </button>
         </div>
+      </div>
 
         <div className="h-16" />
         {/* Sticky nav */}
@@ -701,11 +718,11 @@ export default function ApplyClient() {
         </div>
       </header>
 
-      {stage === "choose" && <ChooseScreen />}
-      {stage === "info" && <InfoScreen />}
-      {stage === "sections" && <SectionScreen />}
-      {stage === "quals" && <QualificationsScreen />}
-      {stage === "review" && <ReviewScreen />}
+      {stage === "choose"   && <ChooseScreen />}
+		{stage === "info"     && <InfoScreen />}
+		{stage === "sections" && <SectionScreen />}
+		{stage === "quals"    && form && <QualificationsScreen f={form} />}
+		{stage === "review"   && form && <ReviewScreen f={form} />}
 
       {toast && (
         <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50">
