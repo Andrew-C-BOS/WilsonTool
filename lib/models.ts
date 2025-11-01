@@ -54,38 +54,110 @@ export interface PropertyDoc {
   createdAt: Date;
 }
 
-/* ---------- Applications ---------- */
+/* ---------- Shared (tenant application roles & statuses) ---------- */
+export type MemberRole = "primary" | "co_applicant" | "cosigner";
+
 export type AppStatus =
+  | "draft"
   | "new"
   | "in_review"
-  | "rejected"
+  | "needs_approval"
   | "approved_pending_lease"
-  | "lease_out"
-  | "countersigned"
-  | "withdrawn";
+  | "rejected";
+
+/* ---------- Tenant application instances (what renters fill) ---------- */
+export interface ApplicationMember {
+  userId: Id;                          // tie to logged-in user (or stable identifier)
+  email: string;
+  name?: string;
+  role: MemberRole;
+  state?: "invited" | "complete" | "missing_docs";
+  joinedAt: Date;
+}
 
 export interface ApplicationDoc {
   _id: Id;
-  orgId: Id;
-  propertyId: string;
-  unitId: string;
-  applicants: {
-    personId: string;
-    name: string;
-    email: string;
-    phone?: string;
-    income?: number;
-    employer?: string;
-    documents?: { kind: string; url: string; uploadedAt: Date }[];
-  }[];
+
+  /* Link back to the form template */
+  formId: Id;
+
+  /* Optional denormalized hints (nice for dashboards) */
+  property?: string;
+  unit?: string;
+
+  /* Household members */
+  members: ApplicationMember[];
+
+  /* Current state */
   status: AppStatus;
-  flags?: { needsMoreDocs?: boolean; risk?: number | null };
-  timeline: { at: Date; by: string; event: string }[];
+
+  /* Optional convenience counters for dashboards (can be computed) */
+  tasks?: {
+    myIncomplete?: number;
+    householdIncomplete?: number;
+    missingDocs?: number;
+  };
+
+  /* Timestamps */
   createdAt: Date;
   updatedAt: Date;
+  submittedAt?: Date;
+
+  /* Future persistence (answers/uploads/chat) can be added later:
+     answers?: Record<string, any>;
+     files?: Record<string, { name: string; size: number; key?: string; url?: string }[]>;
+     messages?: { senderUserId: Id; body: string; at: Date; attachments?: any[] }[];
+  */
 }
 
-/* ---------- Reviews & Approvals ---------- */
+/* ---------- Invites (for joining an application) ---------- */
+export interface ApplicationInviteDoc {
+  _id: Id;
+  token: string;              // unique short code
+  appId: Id;                  // ApplicationDoc._id
+  role?: MemberRole;          // default role for the invite (co_applicant / cosigner)
+  createdAt: Date;
+  expiresAt?: Date;
+  usedBy?: Id;                // userId who redeemed it
+  usedAt?: Date;
+}
+
+/* ---------- Application forms (admin-defined templates) ---------- */
+export interface ApplicationFormDoc {
+  _id: Id;                                 // Mongo _id
+  name: string;
+  description?: string;
+  scope: "portfolio";                      // firm-wide for MVP; add "property" later
+  sections: { id: string; title: string; description?: string }[];
+  questions: {
+    id: string;
+    sectionId: string;
+    label: string;
+    helpText?: string;
+    inputType:
+      | "short_text" | "long_text" | "number" | "currency" | "yes_no"
+      | "date" | "email" | "phone" | "select_single" | "select_multi" | "file";
+    required: boolean;
+    showForRoles: MemberRole[];            // who must answer
+    options?: string[];                    // for select types
+    validation?: { min?: number; max?: number; pattern?: string };
+  }[];
+  qualifications: {
+    id: string;
+    title: string;                         // Government ID, Credit report, …
+    audience: MemberRole[];                // primary / co_applicant / cosigner
+    requirement: "required" | "optional" | "conditional";
+    mode: "self_upload" | "integration" | "either";
+    docKind?: string;                      // "government_id", "credit_report", etc.
+    notes?: string;
+  }[];
+  version: number;
+  createdAt: Date;
+  updatedAt: Date;
+  createdBy?: string;                      // email for traceability
+}
+
+/* ---------- Reviews & Approvals (landlord-side) ---------- */
 export type ReviewDecision = "reject" | "recommend_approve" | "needs_info";
 
 export interface ApplicationReviewDoc {
