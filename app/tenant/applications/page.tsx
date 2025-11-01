@@ -14,8 +14,8 @@ export default async function TenantApplicationsPage() {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <div className="mx-auto max-w-3xl px-4 sm:px-6 py-5">
-        <h1 className="text-xl font-semibold text-gray-900">Your applications</h1>
+      <div className="mx-auto max-w-3xl px-4 sm:px-6 py-4 sm:py-5">
+        <h1 className="text-lg sm:text-xl font-semibold text-gray-900">Your applications</h1>
         <p className="text-sm text-gray-600 mt-1">
           Start a household, join with a code, track progress, chat when needed,
         </p>
