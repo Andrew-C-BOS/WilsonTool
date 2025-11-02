@@ -58,6 +58,19 @@ function StatusChip({ status }: { status: AppStatus }) {
   return <Badge tone={tone as any}>{label}</Badge>;
 }
 
+async function createInviteLink(appId: string, role: "co_applicant" | "cosigner" = "co_applicant") {
+  const res = await fetch(`/api/tenant/applications/${encodeURIComponent(appId)}/invite?debug=1`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ role }),
+    cache: "no-store",
+  }).catch(() => null);
+
+  if (!res) return { ok: false as const, error: "network" as const };
+  const j = await res.json().catch(() => ({}));
+  return res.ok && j?.ok ? ({ ok: true as const, url: j.url as string, code: j.code as string }) : ({ ok: false as const, error: j?.error || "server" as const });
+}
+
 /** Toast respects iOS safe areas, improves a11y on mobile */
 function Toast({ text, onClose }: { text: string; onClose: () => void }) {
   return (
@@ -215,11 +228,11 @@ export default function ApplicationsClient() {
     return arr.sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
   }, [apps, tab, q]);
 
-  function onJoin() {
-    const code = joinCode.trim();
-    if (!code) return setToast("Enter an invite code,");
-    window.location.href = `/tenant/apply?form=${encodeURIComponent(defaultFormId)}&invite=${encodeURIComponent(code)}`;
-  }
+	function onJoin() {
+	  const code = joinCode.trim();
+	  if (!code) return setToast("Enter an invite code,");
+	  window.location.href = `/tenant/apply?join=${encodeURIComponent(code)}`;
+	}
 
   function shareLink(app: TenantApp) {
     const url = new URL(`/tenant/apply`, origin || "http://localhost:3000");
@@ -376,15 +389,20 @@ export default function ApplicationsClient() {
                     >
                       Chat
                     </button>
-                    <button
-                      onClick={async () => {
-                        try { await navigator.clipboard.writeText(shareLink(a)); setToast("Share link copied,"); }
-                        catch { setToast(`Share link: ${shareLink(a)}`); }
-                      }}
-                      className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-900 hover:bg-gray-50 active:opacity-90"
-                    >
-                      Copy link
-                    </button>
+					<button
+					  onClick={async () => {
+						const r = await createInviteLink(a.id, "co_applicant");
+						if (r.ok) {
+						  try { await navigator.clipboard.writeText(r.url); setToast("Invite link copied,"); }
+						  catch { setToast(`Invite link: ${r.url}`); }
+						} else {
+						  setToast("Could not create invite right now,");
+						}
+					  }}
+					  className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-900 hover:bg-gray-50 active:opacity-90"
+					>
+					  Add household members
+					</button>
                   </div>
                 </div>
               );

@@ -258,21 +258,58 @@ function addQualification(kind: "id" | "credit" | "income") {
   }
 
   /* ─── Save, export, import ─── */
-  async function saveDraft() {
-    try {
-      // optional server save, safe to comment out if you haven’t added the API yet
-      const res = await fetch("/api/forms", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(form),
-      });
-      if (!res.ok) throw new Error(await res.text());
-      setToast("Form saved, versioned, firm‑wide,");
-    } catch {
-      setToast("Could not reach server, exporting JSON instead,");
-      exportJson();
+async function saveDraft() {
+  try {
+    // Optional: if you route this builder under /something?firmId=...
+    const firmIdFromUrl = typeof window !== "undefined"
+      ? new URLSearchParams(window.location.search).get("firmId")
+      : null;
+
+    const url = firmIdFromUrl
+      ? `/api/forms?firmId=${encodeURIComponent(firmIdFromUrl)}`
+      : `/api/forms`;
+
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(form),
+    });
+
+    const data = await res.json().catch(() => ({} as any));
+
+    if (!res.ok) {
+      // Map server errors to helpful messages, keep them visible, don’t export
+      switch (data?.error) {
+        case "not_authenticated":
+          setToast("You’re not signed in, please log in,");
+          break;
+        case "no_firm_membership":
+          setToast("No firm membership found for your account,");
+          break;
+        case "ambiguous_firm":
+          setToast("Multiple firms, pass ?firmId= in the URL, or switch firms in the UI,");
+          break;
+        case "not_in_firm":
+          setToast("You’re not a member of that firm,");
+          break;
+        case "invalid_firmId":
+          setToast("Invalid firmId,");
+          break;
+        case "invalid_payload":
+          setToast("Form payload is missing required fields,");
+          break;
+        default:
+          setToast("Could not save, please try again,");
+      }
+      return;
     }
+
+    setToast("Form saved, versioned,");
+  } catch (err) {
+    // Network or unexpected error — still no export, just show a message
+    setToast("Network error while saving, please retry,");
   }
+}
 
   function exportJson() {
     const blob = new Blob([JSON.stringify(form, null, 2)], { type: "application/json" });

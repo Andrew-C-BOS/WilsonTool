@@ -1,9 +1,11 @@
+// app/landlord/applications/page.tsx (or your current path)
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0; // explicitly opt out of SSG/ISR
 
 import { Suspense } from "react";
-import ApplicationsClient from "./ApplicationsClient";
+import ApplicationsResponsive from "./ApplicationsResponsive";
 
 export default function ApplicationsPage() {
   return (
@@ -17,7 +19,7 @@ export default function ApplicationsPage() {
         </div>
 
         <Suspense fallback={<div className="text-sm text-gray-500">Loading…</div>}>
-          <ApplicationsClient />
+          <ApplicationsResponsive />
         </Suspense>
       </div>
     </div>

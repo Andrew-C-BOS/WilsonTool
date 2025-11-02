@@ -12,6 +12,32 @@ export interface UserDoc {
   createdAt: Date;
 }
 
+/* ---------- Firms (top-level landlord entities) ---------- */
+export interface FirmDoc {
+  _id: Id;                     // unique firm identifier (e.g. "firm_abc123")
+  name: string;                // "XYZ Co"
+  slug: string;                // "xyz-co"  (used in URLs)
+  address?: {
+    line1?: string;
+    line2?: string;
+    city?: string;
+    state?: string;
+    zip?: string;
+    country?: string;
+  };
+  logo?: {
+    url: string;               // public image URL (CDN or storage)
+    key?: string;              // optional storage key
+    width?: number;
+    height?: number;
+  };
+  website?: string;            // e.g. "https://xyzco.com"
+  contactEmail?: string;       // e.g. "leasing@xyzco.com"
+  contactPhone?: string;
+  createdAt: Date;
+}
+
+
 /* ---------- Orgs (firms) ---------- */
 export interface OrgDoc {
   _id: Id;
@@ -75,39 +101,27 @@ export interface ApplicationMember {
   joinedAt: Date;
 }
 
+
+/* ---------- Tenant application instances ---------- */
 export interface ApplicationDoc {
   _id: Id;
 
   /* Link back to the form template */
   formId: Id;
 
+  /* Optional: denormalize firm for fast routing (filled from form.firmId) */
+  firmId?: Id;
+
   /* Optional denormalized hints (nice for dashboards) */
   property?: string;
   unit?: string;
 
-  /* Household members */
   members: ApplicationMember[];
-
-  /* Current state */
   status: AppStatus;
-
-  /* Optional convenience counters for dashboards (can be computed) */
-  tasks?: {
-    myIncomplete?: number;
-    householdIncomplete?: number;
-    missingDocs?: number;
-  };
-
-  /* Timestamps */
+  tasks?: { myIncomplete?: number; householdIncomplete?: number; missingDocs?: number };
   createdAt: Date;
   updatedAt: Date;
   submittedAt?: Date;
-
-  /* Future persistence (answers/uploads/chat) can be added later:
-     answers?: Record<string, any>;
-     files?: Record<string, { name: string; size: number; key?: string; url?: string }[]>;
-     messages?: { senderUserId: Id; body: string; at: Date; attachments?: any[] }[];
-  */
 }
 
 /* ---------- Invites (for joining an application) ---------- */
@@ -124,7 +138,11 @@ export interface ApplicationInviteDoc {
 
 /* ---------- Application forms (admin-defined templates) ---------- */
 export interface ApplicationFormDoc {
-  _id: Id;                                 // Mongo _id
+  _id: Id;
+
+  /* NEW: scope forms to a firm */
+  firmId: Id;
+
   name: string;
   description?: string;
   scope: "portfolio";                      // firm-wide for MVP; add "property" later
@@ -144,17 +162,17 @@ export interface ApplicationFormDoc {
   }[];
   qualifications: {
     id: string;
-    title: string;                         // Government ID, Credit report, …
-    audience: MemberRole[];                // primary / co_applicant / cosigner
+    title: string;
+    audience: MemberRole[];
     requirement: "required" | "optional" | "conditional";
     mode: "self_upload" | "integration" | "either";
-    docKind?: string;                      // "government_id", "credit_report", etc.
+    docKind?: string;
     notes?: string;
   }[];
   version: number;
   createdAt: Date;
   updatedAt: Date;
-  createdBy?: string;                      // email for traceability
+  createdBy?: string;
 }
 
 /* ---------- Reviews & Approvals (landlord-side) ---------- */
