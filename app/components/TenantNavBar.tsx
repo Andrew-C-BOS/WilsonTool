@@ -12,6 +12,7 @@ export default function TenantNavBar() {
 
   const links = [
     { href: "/tenant", label: "Home" },
+	{ href: "/tenant/household", label: "My Household" },
     { href: "/tenant/applications", label: "Applications" },
     { href: "/tenant/payments", label: "Payments" },
     { href: "/tenant/documents", label: "Documents" },

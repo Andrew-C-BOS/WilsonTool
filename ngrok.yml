@@ -1,0 +1,8 @@
+version: 2
+authtoken: 303p8zcT3wVF9N0zNvif59DEr9D_3wdAhp3g7HH9WgRfbZqD4
+
+tunnels:
+  milo:
+    proto: http
+    addr: 3000
+    hostname: milo-homes.ngrok-free.app

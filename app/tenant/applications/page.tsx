@@ -1,29 +1,29 @@
 // app/tenant/applications/page.tsx
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-export const revalidate = 0;
+ export const runtime = "nodejs";
+ export const dynamic = "force-dynamic";
+ export const revalidate = 0;
 
-import { redirect } from "next/navigation";
-import { Suspense } from "react";
-import { getSessionUser } from "@/lib/auth";
-import ApplicationsClient from "./ApplicationsClient";
+ import { redirect } from "next/navigation";
+ import { Suspense } from "react";
+ import { getSessionUser } from "@/lib/auth";
+ import ApplicationsRouter from "./ApplicationsRouter";
 
-export default async function TenantApplicationsPage() {
-  const user = await getSessionUser();
-  if (!user) redirect("/login?next=/tenant/applications");
+ export default async function TenantApplicationsPage() {
+   const user = await getSessionUser();
+   if (!user) redirect("/login?next=/tenant/applications");
 
-  return (
-    <div className="min-h-screen bg-gray-50">
-      <div className="mx-auto max-w-3xl px-4 sm:px-6 py-4 sm:py-5">
-        <h1 className="text-lg sm:text-xl font-semibold text-gray-900">Your applications</h1>
-        <p className="text-sm text-gray-600 mt-1">
-          Start a household, join with a code, track progress, chat when needed,
-        </p>
-      </div>
+   return (
+     <div className="min-h-screen bg-gray-50">
+       <div className="mx-auto max-w-3xl px-4 sm:px-6 py-4 sm:py-5">
+         <h1 className="text-lg sm:text-xl font-semibold text-gray-900">Your applications</h1>
+         <p className="text-sm text-gray-600 mt-1">
+           Start a household, join with a code, track progress, chat when needed,
+         </p>
+       </div>
 
-      <Suspense fallback={<div className="px-4 text-sm text-gray-600">Loading…</div>}>
-        <ApplicationsClient />
+     <Suspense fallback={<div className="px-4 text-sm text-gray-600">Loading…</div>}>
+        <ApplicationsRouter />
       </Suspense>
-    </div>
-  );
-}
+     </div>
+   );
+ }

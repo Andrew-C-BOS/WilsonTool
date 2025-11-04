@@ -1,155 +1,188 @@
 // app/api/landlord/applications/[id]/decision/route.ts
-import { NextRequest, NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
+import { NextResponse } from "next/server";
+import { getDb } from "@/lib/db";
+import { getSessionUser } from "@/lib/auth";
+import type { ObjectId } from "mongodb";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const revalidate = 0;
 
-type AppStatus =
-  | "new"
-  | "in_review"
-  | "needs_approval"
-  | "approved_pending_lease"
-  | "rejected";
+/* ───────────────── Types to make Mongo driver happy ───────────────── */
+type IdLike = string | ObjectId;
 
-function mapActionToStatus(action: string): AppStatus | null {
-  const a = String(action || "").toLowerCase();
-  if (a === "preliminary_accept") return "needs_approval";
-  if (a === "approve" || a === "fully_accept") return "approved_pending_lease";
-  if (a === "reject") return "rejected";
-  return null;
-}
+type TimelineEvent = {
+  at: Date;
+  by: string;
+  event: string;
+  meta?: Record<string, unknown>;
+};
 
-/* ----- Prisma ----- */
-async function updateViaPrisma(id: string, status: AppStatus) {
+type ApplicationDoc = {
+  _id: IdLike;
+  formId: IdLike;
+  status: string;
+  householdId?: IdLike;
+  timeline?: TimelineEvent[]; // <-- declare as array so $push is allowed
+};
+
+type ApplicationFormDoc = {
+  _id: IdLike;
+  firmId: IdLike;
+  firmName?: string | null;
+};
+
+type FirmMembershipDoc = {
+  _id: IdLike;
+  firmId: string;            // often stored as string in app DBs
+  userId?: IdLike;
+  email?: string;
+  role?: "member" | "admin" | "owner";
+  active: boolean;
+};
+
+/* ───────────────── helpers ───────────────── */
+function toStringId(v: any) {
+  if (!v) return "";
+  if (typeof v === "string") return v;
   try {
-    const mod = await import("@prisma/client").catch(() => null);
-    if (!mod?.PrismaClient) return false;
-    const prisma = new mod.PrismaClient();
-
-    const candidates = [
-      "householdApplication",
-      "applicationGroup",
-      "application",
-      "tenantApplication",
-    ];
-    const data = {
-      status,
-      workflowStatus: status,
-      state: status,
-      phase: status,
-    } as any;
-
-    for (const name of candidates) {
-      // @ts-ignore
-      const model = (prisma as any)[name];
-      if (!model?.updateMany) continue;
-      try {
-        const r = await model.updateMany({ where: { id }, data });
-        if (r?.count > 0) {
-          await prisma.$disconnect().catch(() => {});
-          return true;
-        }
-      } catch {}
-      try {
-        const r2 = await model.updateMany({ where: { _id: id } as any, data });
-        if (r2?.count > 0) {
-          await prisma.$disconnect().catch(() => {});
-          return true;
-        }
-      } catch {}
-    }
-
-    await prisma.$disconnect().catch(() => {});
-  } catch {}
-  return false;
-}
-
-/* ----- Mongoose ----- */
-async function updateViaMongoose(id: string, status: AppStatus) {
-  try {
-    const mongoose = await import("mongoose").catch(() => null);
-    if (!mongoose) return false;
-
-    const modelNames = [
-      "HouseholdApplication",
-      "ApplicationGroup",
-      "Application",
-      "TenantApplication",
-    ];
-    for (const n of modelNames) {
-      let Model: any = null;
-      try {
-        Model = mongoose.model(n);
-      } catch {}
-      if (!Model) continue;
-
-      try {
-        const r = await Model.updateOne(
-          { _id: id },
-          { $set: { status, workflowStatus: status, state: status, phase: status } }
-        );
-        if (r?.modifiedCount > 0 || r?.matchedCount > 0) return true;
-      } catch {}
-      try {
-        const r2 = await Model.updateOne(
-          { id },
-          { $set: { status, workflowStatus: status, state: status, phase: status } }
-        );
-        if (r2?.modifiedCount > 0 || r2?.matchedCount > 0) return true;
-      } catch {}
-    }
-  } catch {}
-  return false;
-}
-
-/* ----- Raw collections (optional) ----- */
-async function updateViaCollections(id: string, status: AppStatus) {
-  const paths = ["@/app/api/collections", "@/lib/collections", "@/collections"];
-  for (const p of paths) {
-    try {
-      const mod: any = await import(p);
-      const candidates = [
-        "applications",
-        "applicationGroups",
-        "householdApplications",
-        "tenantApplications",
-      ];
-      for (const name of candidates) {
-        const col = mod?.[name] ?? mod?.default?.[name];
-        if (col?.updateOne) {
-          const data = {
-            $set: { status, workflowStatus: status, state: status, phase: status },
-          };
-          const r1 = await col.updateOne({ _id: id }, data);
-          if (r1?.modifiedCount > 0 || r1?.matchedCount > 0) return true;
-          const r2 = await col.updateOne({ id }, data);
-          if (r2?.modifiedCount > 0 || r2?.matchedCount > 0) return true;
-        }
-      }
-    } catch {}
+    return v?.toHexString ? v.toHexString() : String(v);
+  } catch {
+    return String(v);
   }
-  return false;
 }
 
-// ✅ Use RouteContext, await params
+function isHex24(s: string) {
+  return /^[0-9a-fA-F]{24}$/.test(s);
+}
+
+async function getParamsId(req: NextRequest, ctx: { params?: any }) {
+  try {
+    const id = ctx?.params?.id ?? (await (ctx as any).params)?.id;
+    if (id) return String(id);
+  } catch {}
+  const seg = (req.nextUrl?.pathname || "").split("/").filter(Boolean).pop();
+  return seg || "";
+}
+
+/** Safely derive a stable identifier for the current user, stringifying ObjectId if needed. */
+function pickUserId(user: unknown): string {
+  const u = user as any; // SessionUser shape varies across apps
+  return toStringId(
+    u?._id ??
+      u?.id ??     // some auth libs
+      u?.userId ?? // custom user objects
+      u?.sub ??    // JWT subject
+      u?.uid ??    // Firebase-style
+      u?.email ??  // last resort: email as identifier
+      ""
+  );
+}
+
+/* ───────────────── handler ───────────────── */
 export async function POST(
   req: NextRequest,
-  ctx: RouteContext<"/api/landlord/applications/[id]/decision">
+  ctx: { params: { id: string } } | { params: Promise<{ id: string }> }
 ) {
-  const { id } = await ctx.params;
-
-  const body = await req.json().catch(() => ({}));
-  const status = mapActionToStatus(body?.action);
-  if (!status) {
-    return NextResponse.json({ ok: false, error: "invalid_action" }, { status: 400 });
+  const user = await getSessionUser();
+  if (!user) {
+    return NextResponse.json({ ok: false, error: "not_authenticated" }, { status: 401 });
   }
 
-  const ok =
-    (await updateViaPrisma(id, status)) ||
-    (await updateViaMongoose(id, status)) ||
-    (await updateViaCollections(id, status));
+  const db = await getDb();
+  const { ObjectId } = await import("mongodb");
 
-  if (!ok) return NextResponse.json({ ok: false, error: "not_updated" }, { status: 501 });
-  return NextResponse.json({ ok: true, status });
+  // Declare typed collections so update operators are type-safe
+  const apps = db.collection<ApplicationDoc>("applications");
+  const forms = db.collection<ApplicationFormDoc>("application_forms");
+  const fms   = db.collection<FirmMembershipDoc>("firm_memberships");
+
+  const appId = await getParamsId(req, ctx);
+  if (!appId) {
+    return NextResponse.json({ ok: false, error: "bad_application_id" }, { status: 400 });
+  }
+
+  const body = await req.json().catch(() => ({}));
+  const action = String(body?.action || "");
+
+  if (!["preliminary_accept", "approve", "reject"].includes(action)) {
+    return NextResponse.json({ ok: false, error: "bad_action" }, { status: 400 });
+  }
+
+  // Load application (need formId/household) -> load form to get firmId
+  const appFilter = isHex24(appId) ? { _id: new ObjectId(appId) } : ({ _id: appId } as any);
+  const app = await apps.findOne(appFilter, {
+    projection: { _id: 1, formId: 1, status: 1, householdId: 1 },
+  });
+  if (!app) {
+    return NextResponse.json({ ok: false, error: "application_not_found" }, { status: 404 });
+  }
+
+  // Find the form and firmId
+  const formKey = String(app.formId);
+  const form = await forms.findOne(
+    isHex24(formKey) ? { _id: new ObjectId(formKey) } : ({ _id: formKey } as any),
+    { projection: { firmId: 1, firmName: 1 } }
+  );
+  if (!form?.firmId) {
+    return NextResponse.json({ ok: false, error: "form_or_firm_missing" }, { status: 400 });
+  }
+
+  const firmId = String(form.firmId);
+
+  // Resolve current user's membership role (string or ObjectId match)
+  const uidStr = pickUserId(user);
+  const uidOid = ObjectId.isValid(uidStr) ? new ObjectId(uidStr) : null;
+  const userIdOr = uidOid
+    ? [{ userId: uidStr }, { userId: uidOid }]
+    : [{ userId: uidStr }];
+
+  const membership = await fms.findOne(
+    { firmId, active: true, $or: userIdOr },
+    { projection: { role: 1 } }
+  );
+  const role = String(membership?.role || "").toLowerCase() as
+    | "member"
+    | "admin"
+    | "owner"
+    | "";
+
+  // Server-side authorization
+  const canPrelim = role === "member" || role === "admin" || role === "owner";
+  const canApprove = role === "admin" || role === "owner";
+  const canReject = role === "member" || role === "admin" || role === "owner";
+
+  const allowed =
+    action === "preliminary_accept"
+      ? canPrelim
+      : action === "approve"
+      ? canApprove
+      : canReject;
+
+  if (!allowed) {
+    return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
+  }
+
+  // Compute new status based on action
+  const newStatus =
+    action === "preliminary_accept"
+      ? "needs_approval"
+      : action === "approve"
+      ? "approved_pending_lease"
+      : "rejected";
+
+  const now = new Date();
+  const entry: TimelineEvent = {
+    at: now,
+    by: uidStr,
+    event: "status.change",
+    meta: { to: newStatus, via: action },
+  };
+
+  await apps.updateOne(appFilter, {
+    $set: { status: newStatus, updatedAt: now },
+    $push: { timeline: entry }, // ok now that timeline is typed as an array
+  });
+
+  return NextResponse.json({ ok: true, status: newStatus });
 }

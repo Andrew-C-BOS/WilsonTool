@@ -83,14 +83,11 @@ async function resolveFirmForUser(req: NextRequest, user: { _id: string }) {
 
 /* ---------- Types your UI expects ---------- */
 type MemberRole = "primary" | "co-applicant" | "cosigner";
-type AppStatus =
-  | "new"
-  | "in_review"
-  | "needs_approval"
-  | "approved_pending_lease"
-  | "rejected";
+type AppStatus = "new" | "in_review" | "needs_approval" | "approved_pending_lease" | "rejected";
+
 type HouseholdUI = {
-  id: string;
+  id: string;          // householdId (group id)
+  appId: string;       // <-- NEW: application _id (required by Chat open API)
   property: string;
   unit: string;
   submittedAt: string; // ISO
@@ -135,17 +132,33 @@ function toISO(x: any): string {
   const d = new Date(x);
   return isNaN(d.getTime()) ? "" : d.toISOString();
 }
+
+/** household/group id (prefer explicit householdId before _id) */
 function getId(raw: any): string | null {
   const candidate = raw.id ?? raw.hhId ?? raw.householdId ?? raw.applicationGroupId ?? raw._id ?? null;
   if (!candidate) return null;
   if (typeof candidate === "object" && (candidate as any).$oid) return String((candidate as any).$oid);
   return String(candidate);
 }
+
+/** application id resolver (robust across sources) */
+function getAppId(raw: any): string | null {
+  const candidate =
+    raw?.appId ??
+    raw?.applicationId ??
+    raw?.application_id ??
+    (raw?._id ?? null);
+  if (!candidate) return null;
+  if (typeof candidate === "object" && (candidate as any).$oid) return String((candidate as any).$oid);
+  return String(candidate);
+}
+
 function coerce(raw: any): HouseholdUI | null {
   if (!raw) return null;
 
-  const id = getId(raw);
-  if (!id) return null;
+  const id = getId(raw); // household/group id
+  const appId = getAppId(raw); // application id
+  if (!id || !appId) return null;
 
   const property =
     raw.property?.name ??
@@ -161,9 +174,7 @@ function coerce(raw: any): HouseholdUI | null {
     raw.unit ??
     "—";
 
-  const submittedAt = toISO(
-    raw.submittedAt ?? raw.createdAt ?? raw.updatedAt ?? raw.reviewStartedAt
-  );
+  const submittedAt = toISO(raw.submittedAt ?? raw.createdAt ?? raw.updatedAt ?? raw.reviewStartedAt);
   const status = normalizeStatus(raw.status ?? raw.workflowStatus ?? raw.state ?? raw.phase);
 
   const membersRaw: any[] =
@@ -178,14 +189,14 @@ function coerce(raw: any): HouseholdUI | null {
       m.fullName ??
       (m.firstName && m.lastName ? `${m.firstName} ${m.lastName}` : "");
     const email = m.email ?? m.mail ?? "";
-    const state =
-      m.state ?? (m.complete ? "complete" : m.missingDocuments ? "missing_docs" : undefined);
+    const state = m.state ?? (m.complete ? "complete" : m.missingDocuments ? "missing_docs" : undefined);
     const role = normalizeRole(m.role ?? m.type ?? (m.isPrimary ? "primary" : undefined));
     return { name: name || email || "—", email: email || "—", role, state };
   });
 
   return {
     id,
+    appId,      // <-- include application id for chat open
     property: String(property || "—"),
     unit: String(unit || "—"),
     submittedAt,
@@ -233,7 +244,6 @@ async function selectViaMongo(desired: number, firmId: string): Promise<Househol
   const formIdCandidates: (string | ObjectId)[] = formIdDocs.flatMap((x: any) => {
     const s = String(x._id);
     return ObjectId.isValid(s) ? [s, new ObjectId(s)] : [s];
-    // If x._id was already an ObjectId, String(x._id) will produce the hex, which is fine.
   });
 
   const or: any[] = [idEq("firmId", firmId)];
@@ -242,7 +252,21 @@ async function selectViaMongo(desired: number, firmId: string): Promise<Househol
   const query: Filter<any> = { $or: or } as any;
 
   const docs: any[] = await apps
-    .find(query)
+    .find(query, {
+      // Make sure typical fields are available; projection is optional here
+      projection: {
+        _id: 1,
+        householdId: 1,
+        formId: 1,
+        status: 1,
+        submittedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+        members: 1,
+        property: 1,
+        unit: 1,
+      },
+    })
     .sort({ submittedAt: -1, createdAt: -1, updatedAt: -1, _id: -1 })
     .limit(desired)
     .toArray();
@@ -396,7 +420,12 @@ export async function GET(req: NextRequest) {
     const nextCursor = rows.length > limit ? encodeCursor(page[page.length - 1]) : null;
 
     return NextResponse.json(
-      { ok: true, firm: { firmId, firmName, firmSlug }, households: page, nextCursor },
+      {
+        ok: true,
+        firm: { firmId, firmName, firmSlug },
+        households: page,        // each contains { id: householdId, appId, ... }
+        nextCursor,
+      },
       { headers: { "cache-control": "no-store" } }
     );
   } catch (e: any) {

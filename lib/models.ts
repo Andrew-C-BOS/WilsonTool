@@ -124,6 +124,48 @@ export interface ApplicationDoc {
   submittedAt?: Date;
 }
 
+/* ---------- Households: just the group anchor ---------- */
+export interface HouseholdDoc {
+  _id: Id;
+  displayName?: string | null;          // “A2 · Cambridge Flats”, or null
+  createdBy: Id;                         // who formed the cluster
+  createdAt: Date;
+  updatedAt: Date;
+  archived?: boolean;                    // soft flag when emptied or merged
+}
+
+/* ---------- Memberships: the edges between users and a household ---------- */
+export type HouseholdRole = "primary" | "co_applicant" | "cosigner";
+
+export interface HouseholdMembershipDoc {
+  _id: Id;
+  householdId: Id;
+  userId: Id;
+  role: HouseholdRole;                   // household-level role, independent of app roles
+  active: boolean;                       // invariant: at most one active per user
+  joinedAt: Date;
+  leftAt?: Date;
+
+  // convenient denorms for UI lists,
+  email?: string;
+  name?: string;
+}
+
+/* ---------- Invites: to connect more people into the cluster ---------- */
+export interface HouseholdInviteDoc {
+  _id: Id;
+  code: string;                          // short, unique, human-friendly
+  householdId: Id;
+  role?: HouseholdRole;                  // default suggestion for the joiner
+  createdBy: Id;
+  createdAt: Date;
+  expiresAt?: Date;
+  maxUses?: number | null;               // null = unlimited
+  uses: number;                          // increment on redemption
+  disabled?: boolean;
+}
+
+
 /* ---------- Invites (for joining an application) ---------- */
 export interface ApplicationInviteDoc {
   _id: Id;

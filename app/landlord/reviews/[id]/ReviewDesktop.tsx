@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useParams, useSearchParams } from "next/navigation";
-import LocalTime from "@/app/components/Time"; // ← correct relative path (Time.tsx is one level up)
+import LocalTime from "@/app/components/Time";
 
 /* ---------- Types ---------- */
 type MemberRole = "primary" | "co_applicant" | "cosigner" | "co-applicant";
@@ -48,6 +48,8 @@ type ReviewBundle = {
   answersByRole: Record<string, Record<string, any>>;
   timeline: TimelineEvent[];
 };
+
+type FirmViewerRole = "member" | "admin" | "owner" | "none";
 
 /* ---------- Small UI primitives ---------- */
 function clsx(...xs: (string | false | null | undefined)[]) {
@@ -168,6 +170,20 @@ async function fetchBundle(appId: string, firmId?: string): Promise<ReviewBundle
   }
 }
 
+async function fetchUserFirmRole(firmId?: string): Promise<FirmViewerRole> {
+  try {
+    const url = `/api/landlord/firm/role${firmId ? `?firmId=${encodeURIComponent(firmId)}` : ""}`;
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) return "none";
+    const j = await res.json();
+    const r = String(j.role || "").toLowerCase();
+    if (r === "owner" || r === "admin" || r === "member") return r as FirmViewerRole;
+    return "none";
+  } catch {
+    return "none";
+  }
+}
+
 /* ---------- Actions ---------- */
 async function postDecision(appId: string, action: "preliminary_accept" | "approve" | "reject", firmId?: string) {
   const url = `${API(appId, firmId)}/decision`;
@@ -185,7 +201,7 @@ export default function ReviewDesktop({ appId }: { appId?: string }) {
   const routeId = Array.isArray(routeParams?.id) ? routeParams.id[0] : (routeParams?.id as string | undefined);
   const searchParams = useSearchParams();
 
-  // Optional firm tz from the URL, e.g., ?tz=America/New_York
+  // Optional firm tz and firm id from URL
   const firmTz = searchParams.get("tz") || searchParams.get("firmTz") || undefined;
   const firmId = searchParams.get("firmId") || undefined;
 
@@ -195,6 +211,8 @@ export default function ReviewDesktop({ appId }: { appId?: string }) {
   const [bundle, setBundle] = useState<ReviewBundle | null>(null);
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState<string | null>(null);
+  const [viewerRole, setViewerRole] = useState<FirmViewerRole>("none");
+
   const app = bundle;
 
   useEffect(() => {
@@ -208,9 +226,13 @@ export default function ReviewDesktop({ appId }: { appId?: string }) {
 
     (async () => {
       setLoading(true);
-      const b = await fetchBundle(effectiveId as string, firmId);
+      const [b, role] = await Promise.all([
+        fetchBundle(effectiveId as string, firmId),
+        fetchUserFirmRole(firmId),
+      ]);
       if (!cancelled) {
         setBundle(b);
+        setViewerRole(role);
         setLoading(false);
       }
     })();
@@ -225,6 +247,25 @@ export default function ReviewDesktop({ appId }: { appId?: string }) {
     [app]
   );
 
+  const canPrelimByRole = viewerRole === "member" || viewerRole === "admin" || viewerRole === "owner";
+  const canApproveByRole = viewerRole === "admin" || viewerRole === "owner";
+  const canReject = viewerRole !== "none";
+
+  // status gates
+  const isNeedsApproval = !!app && app.status === "needs_approval";
+  const isApproved = !!app && app.status === "approved_pending_lease";
+
+  // Final UI permissions
+  const canPrelimNow = !!app && !isNeedsApproval && !isApproved && canPrelimByRole;
+  const canApproveNow = !!app && !isApproved && canApproveByRole;
+
+  // New: owner can set up holding payment on approved apps
+  const canSetupHolding = viewerRole === "owner" && isApproved;
+  const holdingSetupHref =
+    app && canSetupHolding
+      ? `/landlord/leases/${encodeURIComponent(app.id)}/holding${firmId ? `?firmId=${encodeURIComponent(firmId)}` : ""}`
+      : "";
+
   async function onDecision(action: "preliminary_accept" | "approve" | "reject") {
     if (!app || !isTruthyId(app.id)) return;
     const ok = await postDecision(app.id, action, firmId);
@@ -235,7 +276,7 @@ export default function ReviewDesktop({ appId }: { appId?: string }) {
           : action === "approve"
           ? "Approval recorded,"
           : "Rejection recorded,"
-        : "Could not record decision right now,"
+        : "Unauthorized or failed to record decision,"
     );
     if (ok) {
       const b = await fetchBundle(app.id, firmId);
@@ -288,42 +329,61 @@ export default function ReviewDesktop({ appId }: { appId?: string }) {
               updated <LocalTime iso={app.updatedAt} tz={firmTz} />,{" "}
               submitted <LocalTime iso={app.submittedAt} tz={firmTz} />
             </div>
+            <div className="mt-1 text-xs text-gray-500">
+              Your role: <span className="font-medium">{viewerRole}</span>
+            </div>
           </div>
 
           <div className="flex items-center gap-2">
             <StatusChip status={app.status} />
             <Link
-              href="/landlord/applications"
+              href={`/landlord/applications${firmId ? `?firmId=${encodeURIComponent(firmId)}` : ""}`}
               className="ml-3 rounded-md border border-gray-300 bg-white px-3 py-2 text-xs font-medium text-gray-900 hover:bg-gray-50"
             >
               Back to applications
             </Link>
+
+            {/* New: Set up holding payment (owner, approved apps only) */}
+            {canSetupHolding && (
+              <Link
+                href={holdingSetupHref}
+                className="ml-2 rounded-md bg-blue-600 px-3 py-2 text-xs font-medium text-white hover:bg-blue-700"
+              >
+                Set up Next Steps
+              </Link>
+            )}
           </div>
         </div>
 
         <div className="mt-4 flex flex-wrap gap-2">
-          <button
-            onClick={() => onDecision("preliminary_accept")}
-            className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-900 hover:bg-amber-100"
-          >
-            Prelim accept
-          </button>
-          <button
-            onClick={() => onDecision("approve")}
-            className="rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-900 hover:bg-emerald-100"
-          >
-            Fully accept
-          </button>
-          <button
-            onClick={() => onDecision("reject")}
-            className="rounded-md border border-rose-300 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-900 hover:bg-rose-100"
-          >
-            Reject
-          </button>
+          {canPrelimNow && (
+            <button
+              onClick={() => onDecision("preliminary_accept")}
+              className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-900 hover:bg-amber-100"
+            >
+              Preliminary accept
+            </button>
+          )}
+          {canApproveNow && (
+            <button
+              onClick={() => onDecision("approve")}
+              className="rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-900 hover:bg-emerald-100"
+            >
+              Fully accept
+            </button>
+          )}
+          {canReject && (
+            <button
+              onClick={() => onDecision("reject")}
+              className="rounded-md border border-rose-300 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-900 hover:bg-rose-100"
+            >
+              Reject
+            </button>
+          )}
         </div>
       </div>
 
-      {/* 2‑column layout */}
+      {/* 2-column layout */}
       <div className="grid grid-cols-12 gap-6">
         {/* Left: Answers */}
         <section className="col-span-12 lg:col-span-8 space-y-6">
@@ -339,7 +399,7 @@ export default function ReviewDesktop({ appId }: { appId?: string }) {
                   ? "Primary applicant"
                   : normalizeRole(roleKey) === "cosigner"
                   ? "Cosigner"
-                  : "Co‑applicant";
+                  : "Co-applicant";
               return (
                 <div key={roleKey} className="rounded-xl border border-gray-200 bg-white">
                   <div className="flex items-center justify-between border-b border-gray-100 px-5 py-3">
@@ -406,7 +466,7 @@ export default function ReviewDesktop({ appId }: { appId?: string }) {
                 </div>
               ))}
               <p className="text-xs text-gray-500">
-                Multi‑member households are supported, primary, co‑applicants, cosigners,
+                Multi-member households are supported, primary, co-applicants, cosigners,
               </p>
             </div>
           </div>

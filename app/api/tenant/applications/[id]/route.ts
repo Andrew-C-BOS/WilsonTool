@@ -7,166 +7,259 @@ import { getSessionUser } from "@/lib/auth";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+/* ---------- shared types ---------- */
 type MemberRole = "primary" | "co_applicant" | "cosigner";
-type AppStatus =
-  | "draft"
-  | "new"
-  | "in_review"
-  | "needs_approval"
-  | "approved_pending_lease"
-  | "rejected";
 
-/** Build an _id filter that accepts either ObjectId or string ids */
-async function idFilter(id: string) {
-  const { ObjectId } = await import("mongodb");
-  return /^[0-9a-fA-F]{24}$/.test(id) ? { _id: new ObjectId(id) } : { _id: id as any };
+/* ---------- helpers ---------- */
+function toStringId(v: any): string {
+  if (!v) return "";
+  if (typeof v === "string") return v;
+  try { return v?.toHexString ? v.toHexString() : String(v); } catch { return String(v); }
 }
 
-/** Filter that proves the caller is a member of the application */
-function membershipFilter(user: any) {
-  const userEmail = String(user.email).toLowerCase();
-  const userId = String(user.id ?? user._id ?? user.userId ?? user.email);
-  return {
-    $or: [
-      { "members.userId": userId },
-      { "members.email": userEmail },
-      { "members.email": user.email }, // belt-and-suspenders
-    ],
-  };
+async function pickMembershipsCol(db: any) {
+  const names = [
+    "households_membership",
+    "household_memberhsips",
+    "households_memberhsips",
+    "household_memberships",
+    "households_memberships",
+  ];
+  const existing = new Set((await db.listCollections().toArray()).map((c: any) => c.name));
+  for (const n of names) if (existing.has(n)) return db.collection(n);
+  return db.collection("households_membership");
 }
 
-/** GET /api/tenant/applications/:id — limited view (includes answers) */
-export async function GET(
-  _req: NextRequest,
-  ctx: { params: Promise<{ id: string }> }
+async function resolveMyHouseholdId(db: any, user: any): Promise<string | null> {
+  const col = await pickMembershipsCol(db);
+  const emailLc = String(user?.email ?? "").toLowerCase();
+  const userId = toStringId((user as any).id ?? (user as any)._id ?? (user as any).userId ?? emailLc);
+  const row = await col
+    .find({ $or: [{ userId }, { email: emailLc }, { email: (user as any).email }] })
+    .sort({ active: -1, joinedAt: -1 })
+    .limit(1)
+    .next();
+  return row ? toStringId(row.householdId) : null;
+}
+
+async function getIdFromParamsOrUrl(
+  req: NextRequest,
+  paramInput: { id: string } | Promise<{ id: string }>
 ) {
   try {
-    const user = await getSessionUser();
-    if (!user) return NextResponse.json({ ok: false, error: "not_authenticated" }, { status: 401 });
-
-    const { id } = await ctx.params;
-
-    const db = await getDb();
-    const col = db.collection("applications");
-
-    // First, check for a document where the caller is a member
-    const app = await col.findOne(
-      { $and: [await idFilter(id), membershipFilter(user)] },
-      {
-        projection: {
-          formId: 1,
-          status: 1,
-          members: 1,
-          property: 1,
-          unit: 1,
-          answers: 1,
-          createdAt: 1,
-          updatedAt: 1,
-          submittedAt: 1,
-          tasks: 1,
-        },
-      }
-    );
-
-    if (!app) {
-      // Distinguish “doesn’t exist” from “exists but you’re not a member”
-      const exists = await col.findOne(await idFilter(id), { projection: { _id: 1, members: 1 } });
-      return NextResponse.json(
-        { ok: false, error: exists ? "forbidden" : "not_found" },
-        { status: exists ? 403 : 404 }
-      );
-    }
-
-    return NextResponse.json({ ok: true, app: { ...app, id: String((app as any)._id) } });
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e.message || "server_error" }, { status: 500 });
-  }
+    const p = await paramInput;
+    if (p?.id) return String(p.id);
+  } catch {}
+  const path = req.nextUrl?.pathname || "";
+  const seg = path.split("/").filter(Boolean).pop();
+  return seg || "";
 }
 
-/**
- * PATCH /api/tenant/applications/:id
- * Body supports:
- *  - { status: AppStatus }
- *  - { updates: [{ role: MemberRole, qid: string, value: any }, ...] }
- *  - { answersForRole: { role: MemberRole, answers: Record<string, any> } }
- */
+/* ============================================================
+   GET /api/tenant/applications/[id]
+============================================================ */
+export async function GET(
+  req: NextRequest,
+  ctx: { params: { id: string } } | { params: Promise<{ id: string }> }
+) {
+  const user = await getSessionUser();
+  if (!user) return NextResponse.json({ ok: false, error: "not_authenticated" }, { status: 401 });
+
+  const url = new URL(req.url);
+  const DEBUG = url.searchParams.get("debug") === "1";
+  const dbg = (x: any) => (DEBUG ? x : undefined);
+
+  const db = await getDb();
+  const appsCol = db.collection("applications");
+  const { ObjectId } = await import("mongodb");
+
+  const appId = await getIdFromParamsOrUrl(req, (ctx as any).params);
+  if (!appId) return NextResponse.json({ ok: false, error: "bad_app_id" }, { status: 400 });
+
+  const filter =
+    /^[0-9a-fA-F]{24}$/.test(appId) ? { _id: new ObjectId(appId) } : ({ _id: appId } as any);
+
+  const app = await appsCol.findOne(filter, {
+    projection: {
+      formId: 1,
+      status: 1,
+      householdId: 1,
+      updatedAt: 1,
+      submittedAt: 1,
+      answers: 1,
+      members: 1,
+    },
+  });
+  if (!app) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+
+  // Auth by household, with legacy back-compat
+  const myHouseholdId = await resolveMyHouseholdId(db, user);
+  const emailLc = String(user.email ?? "").toLowerCase();
+  const userId = toStringId((user as any).id ?? (user as any)._id ?? (user as any).userId ?? emailLc);
+
+  const appHid = app.householdId ? String(app.householdId) : null;
+
+  let allowed = false;
+  let reason = "none";
+
+  if (appHid && myHouseholdId && appHid === myHouseholdId) {
+    allowed = true;
+    reason = "household_match";
+  } else if (!appHid && myHouseholdId) {
+    allowed = true;
+    reason = "household_missing";
+  } else if (!allowed && Array.isArray(app.members) && app.members.length) {
+    const legacyHit = app.members.some(
+      (m: any) => m.userId === userId || String(m.email || "").toLowerCase() === emailLc
+    );
+    if (legacyHit) {
+      allowed = true;
+      reason = "legacy_membership";
+    }
+  }
+
+  if (!allowed) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden", debug: dbg({ myHouseholdId, appHid, reason }) },
+      { status: 403 }
+    );
+  }
+
+  return NextResponse.json({
+    ok: true,
+    app: {
+      id: String(app._id),
+      formId: String(app.formId),
+      status: app.status,
+      householdId: appHid ?? undefined,
+      updatedAt: app.updatedAt ?? null,
+      submittedAt: app.submittedAt ?? null,
+    },
+    debug: dbg({ myHouseholdId, appHid, reason }),
+  });
+}
+
+/* ============================================================
+   PATCH /api/tenant/applications/[id]
+   Body:
+     { status: AppStatus }
+   OR
+     { updates: [{ role, qid, value }, ...] }
+============================================================ */
 export async function PATCH(
   req: NextRequest,
-  ctx: { params: Promise<{ id: string }> }
+  ctx: { params: { id: string } } | { params: Promise<{ id: string }> }
 ) {
-  try {
-    const user = await getSessionUser();
-    if (!user) return NextResponse.json({ ok: false, error: "not_authenticated" }, { status: 401 });
+  const user = await getSessionUser();
+  if (!user) return NextResponse.json({ ok: false, error: "not_authenticated" }, { status: 401 });
 
-    const { id } = await ctx.params;
+  const url = new URL(req.url);
+  const DEBUG = url.searchParams.get("debug") === "1";
+  const dbg = (x: any) => (DEBUG ? x : undefined);
 
-    const db = await getDb();
-    const col = db.collection("applications");
+  const db = await getDb();
+  const appsCol = db.collection("applications");
+  const { ObjectId } = await import("mongodb");
 
-    const now = new Date();
-    const body = await req.json().catch(() => ({} as any));
+  const appId = await getIdFromParamsOrUrl(req, (ctx as any).params);
+  if (!appId) return NextResponse.json({ ok: false, error: "bad_app_id" }, { status: 400 });
 
-    const sets: Record<string, any> = { updatedAt: now };
-    const timeline: Array<{ at: Date; by: string; event: string; meta?: any }> = [];
+  const filter =
+    /^[0-9a-fA-F]{24}$/.test(appId) ? { _id: new ObjectId(appId) } : ({ _id: appId } as any);
 
-    // Identify actor
-    const actor = String(
-	  (user as any).id ??
-	  (user as any)._id ??
-	  (user as any).userId ??
-	  user.email
-	);
+  const app = await appsCol.findOne(filter, {
+    projection: { formId: 1, status: 1, householdId: 1, members: 1 },
+  });
+  if (!app) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
 
-    // 1) Status change
-    if (body?.status) {
-      const nextStatus = String(body.status) as AppStatus;
-      sets.status = nextStatus;
-      // Simple first-submission timestamp (ok for MVP)
-      if (nextStatus === "new") sets.submittedAt = now;
-      timeline.push({ at: now, by: actor, event: "status.change", meta: { to: nextStatus } });
-    }
+  // Auth by household, with back-compat
+  const myHouseholdId = await resolveMyHouseholdId(db, user);
+  const emailLc = String(user.email ?? "").toLowerCase();
+  const userId = toStringId((user as any).id ?? (user as any)._id ?? (user as any).userId ?? emailLc);
 
-    // 2) Incremental answer updates
-    if (Array.isArray(body?.updates) && body.updates.length) {
-      for (const u of body.updates as Array<{ role: MemberRole; qid: string; value: any }>) {
-        if (!u || !u.role || !u.qid) continue;
-        sets[`answers.${u.role}.${u.qid}`] = u.value;
-      }
-      timeline.push({ at: now, by: actor, event: "answers.update", meta: { count: body.updates.length } });
-    }
+  const appHid = app.householdId ? String(app.householdId) : null;
 
-    // 3) Replace a role’s entire answer map
-    if (body?.answersForRole?.role && body?.answersForRole?.answers) {
-      const r = body.answersForRole.role as MemberRole;
-      const a = body.answersForRole.answers as Record<string, any>;
-      sets[`answers.${r}`] = a;
-      timeline.push({ at: now, by: actor, event: "answers.replace", meta: { role: r, fields: Object.keys(a).length } });
-    }
+  let allowed = false;
+  let reason = "none";
 
-    if (Object.keys(sets).length === 1 /* only updatedAt */) {
-      return NextResponse.json({ ok: false, error: "no_changes" }, { status: 400 });
-    }
-
-    const update: any = { $set: sets };
-    if (timeline.length) update.$push = { timeline: { $each: timeline } };
-
-    // Enforce membership
-    const res = await col.updateOne(
-      { $and: [await idFilter(id), membershipFilter(user)] },
-      update
+  if (appHid && myHouseholdId && appHid === myHouseholdId) {
+    allowed = true;
+    reason = "household_match";
+  } else if (!appHid && myHouseholdId) {
+    await appsCol.updateOne(filter, { $set: { householdId: myHouseholdId } });
+    allowed = true;
+    reason = "household_attached";
+  } else if (!allowed && Array.isArray(app.members) && app.members.length) {
+    const legacyHit = app.members.some(
+      (m: any) => m.userId === userId || String(m.email || "").toLowerCase() === emailLc
     );
+    if (legacyHit) {
+      allowed = true;
+      reason = "legacy_membership";
+    }
+  }
 
-    if (res.matchedCount === 0) {
-      // Didn’t match under membership: decide not_found vs forbidden
-      const exists = await col.findOne(await idFilter(id), { projection: { _id: 1, members: 1 } });
-      return NextResponse.json(
-        { ok: false, error: exists ? "forbidden" : "not_found" },
-        { status: exists ? 403 : 404 }
-      );
+  if (!allowed) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden", debug: dbg({ myHouseholdId, appHid, reason }) },
+      { status: 403 }
+    );
+  }
+
+  const body = await req.json().catch(() => ({}));
+  const now = new Date();
+
+  // Status-only change
+  if (typeof body?.status === "string") {
+    const upd = await appsCol.updateOne(filter, {
+      $set: { status: body.status, updatedAt: now },
+      $push: {
+        timeline: {
+          at: now,
+          by: userId,
+          event: "status.change",
+          meta: { to: body.status },
+        },
+      } as any,
+    });
+    return NextResponse.json({ ok: true, modified: upd.modifiedCount, debug: dbg({ reason }) });
+  }
+
+  // Debounced answer updates
+  if (Array.isArray(body?.updates) && body.updates.length > 0) {
+    type Up = { role: MemberRole | string; qid: string; value: any };
+    const updates: Up[] = body.updates as Up[];
+
+    // Build $set paths like "answers.primary.q_email": "foo"
+    const setPaths: Record<string, any> = {};
+    for (const u of updates) {
+      const rawRole = String((u as any).role ?? "").toLowerCase();
+      const r: MemberRole =
+        rawRole === "co_applicant" || rawRole === "cosigner" ? (rawRole as MemberRole) : "primary";
+
+      const qid = String(u.qid);
+      setPaths[`answers.${r}.${qid}`] = u.value;
     }
 
-    return NextResponse.json({ ok: true });
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e.message || "server_error" }, { status: 500 });
+    const upd = await appsCol.updateOne(filter, {
+      $set: { ...setPaths, updatedAt: now },
+      $push: {
+        timeline: {
+          at: now,
+          by: userId,
+          event: "answers.update",
+          meta: { count: updates.length },
+        },
+      } as any,
+    });
+
+    return NextResponse.json({
+      ok: true,
+      modified: upd.modifiedCount,
+      debug: dbg({ reason, count: updates.length }),
+    });
   }
+
+  // Nothing to do
+  return NextResponse.json({ ok: true, noop: true, debug: dbg({ reason }) });
 }

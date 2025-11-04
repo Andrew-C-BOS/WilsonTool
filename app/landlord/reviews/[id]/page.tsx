@@ -5,8 +5,26 @@ export const revalidate = 0;
 import { Suspense } from "react";
 import ReviewDesktop from "./ReviewDesktop";
 
-export default function ReviewPage({ params }: { params: { id: string | string[] } }) {
-  const id = Array.isArray(params?.id) ? params.id[0] : params?.id;
+export default async function ReviewPage({
+  params,
+}: {
+  params: Promise<{ id: string | string[] }>;
+}) {
+  // In Next.js (app router), `params` can be a Promise — unwrap it.
+  const { id: raw } = await params;
+  const id = Array.isArray(raw) ? raw[0] : raw;
+
+  if (!id) {
+    return (
+      <div className="min-h-screen bg-gray-50">
+        <div className="mx-auto max-w-[1400px] px-6 py-6">
+          <div className="rounded-xl border border-amber-200 bg-amber-50 p-6 text-sm text-amber-900">
+            Missing application id, please navigate from the Applications table again,
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gray-50">
