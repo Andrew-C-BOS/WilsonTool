@@ -44,10 +44,8 @@ function anyIdQuery(raw: any, fields: string[] = ["_id"]) {
   const asOid = ensureObjectId(raw);
   if (asOid) candidates.push(asOid);
 
-  // Also include a string version when an ObjectId comes in
   if (raw instanceof ObjectId) candidates.push(String(raw));
 
-  // De-dupe
   const uniq = Array.from(new Set(candidates.map((c) => String(c))))
     .map((s) => (ObjectId.isValid(s) ? [s, new ObjectId(s)] : [s]))
     .flat();
@@ -65,6 +63,9 @@ const idFilter = (raw: unknown): Filter<any> =>
   ObjectId.isValid(String(raw))
     ? { _id: new ObjectId(String(raw)) }
     : { _id: String(raw) };
+
+/* ---------- RouteContext type ---------- */
+type RouteContext<P extends string> = { params: Promise<Record<"id", string>> };
 
 /* ---------- Firm resolution ---------- */
 async function resolveFirmForUser(req: NextRequest, user: { _id: any }) {
@@ -119,8 +120,121 @@ async function resolveFirmForUser(req: NextRequest, user: { _id: any }) {
   return { firmId: firm._id, firmName: firm.name, firmSlug: firm.slug };
 }
 
+/* ---------- Membership map helpers (re-key to userId) ---------- */
+function toStringId(v: any): string {
+  if (!v) return "";
+  if (typeof v === "string") return v;
+  try {
+    return v?.toHexString ? v.toHexString() : String(v);
+  } catch {
+    return String(v);
+  }
+}
+
+async function pickHouseholdMembershipsCol(db: any) {
+  const names = [
+    "households_membership",
+    "household_memberhsips",
+    "households_memberhsips",
+    "household_memberships",
+    "households_memberships",
+  ];
+  const existing = new Set((await db.listCollections().toArray()).map((c: any) => c.name));
+  for (const n of names) if (existing.has(n)) return db.collection(n);
+  return db.collection("households_membership");
+}
+
+/** Build membershipId -> userId map for a given householdId */
+async function buildMembershipIdToUserIdMap(db: any, householdId: string | null) {
+  const map = new Map<string, string>();
+  if (!householdId) return map;
+  const col = await pickHouseholdMembershipsCol(db);
+  const rows = await col.find({ householdId }).project({ _id: 1, userId: 1 }).toArray();
+  for (const r of rows) {
+    const mid = toStringId(r._id);
+    const uid = toStringId(r.userId);
+    if (mid && uid) map.set(mid, uid);
+  }
+  return map;
+}
+
+/** Re-key an answersByMember object from possibly membershipId keys -> userId keys */
+function rekeyAnswersByMemberToUserId(
+  answersByMember: Record<string, any> | undefined,
+  m2u: Map<string, string>
+): Record<string, { role: string; email: string; answers: Record<string, any> }> {
+  const out: Record<string, { role: string; email: string; answers: Record<string, any> }> = {};
+  if (!answersByMember || typeof answersByMember !== "object") return out;
+  for (const [key, val] of Object.entries(answersByMember)) {
+    const userKey = m2u.get(key) ?? key;
+    const role = String((val as any)?.role ?? "co_applicant");
+    const email = String((val as any)?.email ?? "").toLowerCase();
+    const answers = ((val as any)?.answers && typeof (val as any).answers === "object") ? (val as any).answers : {};
+    if (!out[userKey]) out[userKey] = { role, email, answers: { ...answers } };
+    else out[userKey] = { role, email: out[userKey].email || email, answers: { ...out[userKey].answers, ...answers } };
+  }
+  return out;
+}
+
+/** Derive answersByRole from answersByMember + known member roles */
+function deriveAnswersByRole(
+  answersByMemberUserId: Record<string, { role: string; email: string; answers: Record<string, any> }>,
+  members: Array<{ userId?: string; role?: string }>
+): Record<string, Record<string, any>> {
+  const roleOfUser: Record<string, string> = {};
+  for (const m of members) {
+    if (m?.userId) roleOfUser[String(m.userId)] = String(m.role ?? "co_applicant");
+  }
+  const byRole: Record<string, Record<string, any>> = {};
+  for (const [uid, bucket] of Object.entries(answersByMemberUserId)) {
+    const role = String(roleOfUser[uid] ?? bucket.role ?? "co_applicant").toLowerCase();
+    byRole[role] = { ...(byRole[role] || {}), ...bucket.answers };
+  }
+  return byRole;
+}
+
+/* ---------- Normalizers for countersign & plan ---------- */
+function normalizeCountersign(raw: any) {
+  if (!raw) return null;
+  return {
+    allowed: Boolean(raw.allowed),
+    upfrontMinCents: Number(raw.upfrontMinCents ?? 0),
+    depositMinCents: Number(raw.depositMinCents ?? 0),
+  };
+}
+
+function normalizePaymentPlan(app: any) {
+  const plan = app?.paymentPlan ?? null;
+  if (!plan && !app?.protoLease) return null;
+
+  const monthlyRentCents =
+    Number(plan?.monthlyRentCents ?? app?.protoLease?.monthlyRent ?? 0);
+  const termMonths = Number(plan?.termMonths ?? app?.protoLease?.termMonths ?? 0);
+  const startDate = String(plan?.startDate ?? app?.protoLease?.moveInDate ?? "");
+
+  return {
+    monthlyRentCents,
+    termMonths,
+    startDate, // YYYY-MM-DD expected
+    securityCents: Number(plan?.securityCents ?? 0),
+    keyFeeCents: Number(plan?.keyFeeCents ?? 0),
+    requireFirstBeforeMoveIn: Boolean(plan?.requireFirstBeforeMoveIn),
+    requireLastBeforeMoveIn: Boolean(plan?.requireLastBeforeMoveIn),
+    countersignUpfrontThresholdCents: Number(plan?.countersignUpfrontThresholdCents ?? 0),
+    countersignDepositThresholdCents: Number(plan?.countersignDepositThresholdCents ?? 0),
+    upfrontTotals: {
+      firstCents: Number(plan?.upfrontTotals?.firstCents ?? 0),
+      lastCents: Number(plan?.upfrontTotals?.lastCents ?? 0),
+      keyCents: Number(plan?.upfrontTotals?.keyCents ?? 0),
+      securityCents: Number(plan?.upfrontTotals?.securityCents ?? 0),
+      otherUpfrontCents: Number(plan?.upfrontTotals?.otherUpfrontCents ?? 0),
+      totalUpfrontCents: Number(plan?.upfrontTotals?.totalUpfrontCents ?? 0),
+    },
+    priority: Array.isArray(plan?.priority) ? plan!.priority : [],
+  };
+}
+
 /* ---------- GET /api/landlord/applications/[id] ---------- */
-// ✅ Next 15: params is a Promise; use RouteContext and await.
 export async function GET(
   req: NextRequest,
   ctx: RouteContext<"/api/landlord/applications/[id]">
@@ -136,6 +250,7 @@ export async function GET(
     const firm = await resolveFirmForUser(req, user);
     const db = await getDb();
 
+    // Load application
     const app = await db.collection("applications").findOne({
       $or: [
         ...((anyIdQuery(id, ["_id"]) as any).$or ?? []),
@@ -144,6 +259,7 @@ export async function GET(
     });
     if (!app) throw new HttpError(404, "not_found");
 
+    // Load form
     const formIdRaw = app.formId ?? app.form_id ?? app.form?._id ?? app.form?.id;
     const form = await db.collection("application_forms").findOne(
       {
@@ -156,10 +272,35 @@ export async function GET(
     );
     if (!form) throw new HttpError(400, "form_not_found");
 
+    // Firm authorization (form-owned or application-owned)
     const owningFirmId = form.firmId || app.firmId;
     if (owningFirmId && String(owningFirmId) !== String(firm.firmId)) {
       throw new HttpError(403, "not_in_firm");
     }
+
+    // Membership map for canonical userId keys
+    const householdId = app.householdId ? String(app.householdId) : null;
+    const m2u = await buildMembershipIdToUserIdMap(db, householdId);
+
+    // Normalize members
+    const members = Array.isArray(app.members)
+      ? app.members.map((m: any) => ({
+          userId: m.userId ? String(m.userId) : undefined,
+          email: String(m.email || "").toLowerCase(),
+          role: String(m.role || "co_applicant"),
+          state: m.state ?? undefined,
+          joinedAt: toISO(m.joinedAt),
+          name: m.name ?? undefined,
+        }))
+      : [];
+
+    // Answers
+    const answersByMemberUserId = rekeyAnswersByMemberToUserId(app.answersByMember, m2u);
+    const answersByRole = deriveAnswersByRole(answersByMemberUserId, members);
+
+    // Normalize countersign & plan (always present in response as object or null)
+    const countersign = normalizeCountersign(app.countersign);
+    const paymentPlan = normalizePaymentPlan(app);
 
     const application = {
       id: String(app._id ?? app.id),
@@ -167,17 +308,9 @@ export async function GET(
       createdAt: toISO(app.createdAt),
       updatedAt: toISO(app.updatedAt),
       submittedAt: toISO(app.submittedAt),
-      members: Array.isArray(app.members)
-        ? app.members.map((m: any) => ({
-            userId: m.userId ?? undefined,
-            email: String(m.email || ""),
-            role: String(m.role || "co_applicant"),
-            state: m.state ?? undefined,
-            joinedAt: toISO(m.joinedAt),
-            name: m.name ?? undefined,
-          }))
-        : [],
-      answers: app.answers ?? {},
+      members,
+      answersByMember: answersByMemberUserId,
+      answers: answersByRole,
       timeline: Array.isArray(app.timeline)
         ? app.timeline.map((t: any) => ({
             at: toISO(t.at),
@@ -186,6 +319,13 @@ export async function GET(
             meta: t.meta ?? undefined,
           }))
         : [],
+      building: app.building ?? null,
+      unit: app.unit ?? null,
+      protoLease: app.protoLease ?? null,
+
+      // NEW: consistent outputs
+      countersign,     // { allowed, upfrontMinCents, depositMinCents } | null
+      paymentPlan,     // { monthlyRentCents, termMonths, startDate, ... } | null
     };
 
     const formLite = {

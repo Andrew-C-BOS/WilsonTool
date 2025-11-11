@@ -16,10 +16,10 @@ function toStringId(v: any) {
 const rand = (n = 16) => Array.from({ length: n }, () => Math.floor(Math.random() * 36).toString(36)).join("");
 const isHex24 = (s: string) => /^[0-9a-fA-F]{24}$/.test(s);
 
-// --- NEW: robust id reader (supports Promise params & URL fallback)
+// Robust id reader (supports Promise params & URL fallback)
 async function getIdParam(req: NextRequest, ctx: { params?: any }) {
   try {
-    const p = await (ctx as any)?.params; // handles both plain object and Promise
+    const p = await (ctx as any)?.params;
     const raw = Array.isArray(p?.id) ? p.id[0] : p?.id;
     if (raw) return String(raw);
   } catch {}
@@ -28,7 +28,7 @@ async function getIdParam(req: NextRequest, ctx: { params?: any }) {
   return seg || "";
 }
 
-// --- NEW: safe user id picker, tolerant of varied auth shapes
+// Safe user id picker, tolerant of varied auth shapes
 function pickUserId(user: unknown): string {
   const u = user as any;
   return toStringId(
@@ -56,11 +56,12 @@ export async function POST(
   const fms = db.collection("firm_memberships");
   const { ObjectId } = await import("mongodb");
 
-  const appId = await getIdParam(req, ctx as any); // <-- unwrap params safely
+  const appId = await getIdParam(req, ctx as any);
   const body = await req.json().catch(() => ({}));
 
-  const amounts = body?.amounts ?? {};
+  // Inputs (all cents; minimumDue==0 means NO HOLD)
   const monthlyRent = Number(body?.monthlyRent ?? 0) | 0;
+  const amounts = body?.amounts ?? {};
   const minimumDue = Number(body?.minimumDue ?? 0) | 0;
 
   // Load application (string or ObjectId)
@@ -70,15 +71,15 @@ export async function POST(
   });
   if (!app) return NextResponse.json({ ok: false, error: "application_not_found" }, { status: 404 });
 
-  // Load form → firmId (string or ObjectId)
+  // Resolve firm via form
   const formKey = String(app.formId);
   const formFilter = isHex24(formKey) ? { _id: new ObjectId(formKey) } : ({ _id: formKey } as any);
   const form = await forms.findOne(formFilter, { projection: { firmId: 1 } });
   if (!form?.firmId) return NextResponse.json({ ok: false, error: "firm_not_found" }, { status: 400 });
   const firmId = String(form.firmId);
 
-  // Firm auth (userId may be stored as string or ObjectId)
-  const uidStr = pickUserId(user); // <-- replaced direct user.id access
+  // Firm auth
+  const uidStr = pickUserId(user);
   const uidOid = ObjectId.isValid(uidStr) ? new ObjectId(uidStr) : null;
   const userIdOr = uidOid ? [{ userId: uidStr }, { userId: uidOid }] : [{ userId: uidStr }];
 
@@ -88,16 +89,53 @@ export async function POST(
   );
   if (!membership) return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
 
-  // If a PAID hold already exists, block
+  // Existing hold doc if any
   const existing = await holds.findOne(
     { appId: String(app._id), firmId, status: { $in: ["pending", "paid"] } },
     { projection: { _id: 1, status: 1, token: 1 } }
   );
   if (existing?.status === "paid") {
+    // Already paid — nothing to configure
     return NextResponse.json({ ok: false, error: "already_paid" }, { status: 409 });
   }
 
-  // Validate MA caps
+  const now = new Date();
+
+  // === PATH A: NO HOLD REQUIRED (minimumDue === 0) ===========================
+  if (minimumDue === 0) {
+    // If there was a pending hold, mark it canceled (best-effort)
+    if (existing?.status === "pending") {
+      try {
+        await holds.updateOne({ _id: existing._id }, { $set: { status: "canceled", canceledAt: now } });
+      } catch {}
+    }
+
+    // Mark application as "approved_ready_to_lease"
+    await apps.updateOne(appFilter, {
+      $set: { status: "approved_ready_to_lease", updatedAt: now },
+      $push: {
+        timeline: {
+          at: now,
+          by: uidStr,
+          event: "status.change",
+          meta: { to: "approved_ready_to_lease", via: "holding_setup_none" },
+        },
+      } as any,
+    });
+
+    return NextResponse.json({
+      ok: true,
+      status: "approved_ready_to_lease",
+      payUrl: null,
+      token: null,
+      minimumDue: 0,
+      total: 0,
+    });
+  }
+
+  // === PATH B: HOLD REQUIRED (minimumDue > 0) ================================
+
+  // Validate MA caps only when requesting money
   const a = {
     first: Number(amounts.first || 0),
     last: Number(amounts.last || 0),
@@ -107,7 +145,7 @@ export async function POST(
   const { ok, errs, total } = validateMAHolding(a, monthlyRent);
   if (!ok) return NextResponse.json({ ok: false, error: "invalid_amounts", details: errs }, { status: 400 });
 
-  // Validate minimumDue
+  // Validate minimumDue bounds
   if (!(minimumDue > 0 && minimumDue <= total)) {
     return NextResponse.json(
       { ok: false, error: "invalid_minimum", details: ["minimumDue must be > 0 and ≤ total"] },
@@ -115,6 +153,7 @@ export async function POST(
     );
   }
 
+  // Prepare / upsert hold doc
   const token = existing?.token ?? `hold_${rand(22)}`;
   const doc = {
     _id: existing?._id ?? token,
@@ -125,16 +164,34 @@ export async function POST(
     monthlyRent,
     total,
     minimumDue,
-    status: "pending",
+    status: "pending" as const,
     token,
-    createdAt: new Date(),
+    createdAt: existing ? undefined : now,
+    updatedAt: now,
   };
 
   await holds.updateOne({ _id: doc._id }, { $set: doc }, { upsert: true });
 
-  // Optionally reflect that we’re gating on payment
-  await apps.updateOne(appFilter, { $set: { status: "needs_approval" } });
+  // Update application status → approved_pending_payment
+  await apps.updateOne(appFilter, {
+    $set: { status: "approved_pending_payment", updatedAt: now },
+    $push: {
+      timeline: {
+        at: now,
+        by: uidStr,
+        event: "status.change",
+        meta: { to: "approved_pending_payment", via: "holding_setup" },
+      },
+    } as any,
+  });
 
   const payUrl = `/hold/${encodeURIComponent(token)}`;
-  return NextResponse.json({ ok: true, payUrl, token, total, minimumDue });
+  return NextResponse.json({
+    ok: true,
+    status: "approved_pending_payment",
+    payUrl,
+    token,
+    total,
+    minimumDue,
+  });
 }

@@ -1,3 +1,4 @@
+// app/tenant/applications/ApplicationsDesktop.tsx
 "use client";
 
 import Link from "next/link";
@@ -10,6 +11,10 @@ type AppStatus =
   | "in_review"
   | "needs_approval"
   | "approved_pending_lease"
+  | "approved_pending_payment"
+  | "approved_ready_to_lease"
+  | "countersign_ready"        // ← NEW
+  | "leased"
   | "rejected";
 
 type TenantApp = {
@@ -19,7 +24,7 @@ type TenantApp = {
   property?: string;
   unit?: string;
   status: AppStatus;
-  updatedAt: string;       // YYYY-MM-DD
+  updatedAt: string; // YYYY-MM-DD
   submittedAt?: string;
 };
 
@@ -58,29 +63,29 @@ function Badge({
 
 function StatusChip({ status }: { status: AppStatus }) {
   const tone =
-    status === "draft"
-      ? "gray"
-      : status === "new"
-      ? "blue"
-      : status === "in_review"
-      ? "amber"
-      : status === "needs_approval"
-      ? "violet"
-      : status === "approved_pending_lease"
-      ? "emerald"
-      : "rose";
+    status === "draft" ? "gray" :
+    status === "new" ? "blue" :
+    status === "in_review" ? "amber" :
+    status === "needs_approval" ? "violet" :
+    status === "approved_pending_payment" ? "violet" :
+    status === "approved_ready_to_lease" ? "emerald" :
+    status === "approved_pending_lease" ? "emerald" :
+    status === "countersign_ready" ? "emerald" :     // ← NEW
+    status === "leased" ? "emerald" :
+    "rose";
+
   const label =
-    status === "draft"
-      ? "Draft"
-      : status === "new"
-      ? "New"
-      : status === "in_review"
-      ? "In review"
-      : status === "needs_approval"
-      ? "Needs approval"
-      : status === "approved_pending_lease"
-      ? "Approved"
-      : "Rejected";
+    status === "draft" ? "Draft" :
+    status === "new" ? "New" :
+    status === "in_review" ? "In review" :
+    status === "needs_approval" ? "Needs approval" :
+    status === "approved_pending_payment" ? "Approved · Pending payment" :
+    status === "approved_ready_to_lease" ? "Approved · Ready to lease" :
+    status === "approved_pending_lease" ? "Approved" :
+    status === "countersign_ready" ? "Ready to countersign" :  // ← NEW
+    status === "leased" ? "Leased" :
+    "Rejected";
+
   return <Badge tone={tone as any}>{label}</Badge>;
 }
 
@@ -147,6 +152,9 @@ function Modal({
 /* Minimal demo fallback, shown until API returns */
 const DEMO_APPS: TenantApp[] = [];
 
+// If you need to hardcode a firm for now:
+const DEFAULT_FIRM_ID = "firm_mhgg3yc9e79wis";
+
 export default function ApplicationsClient() {
   const [apps, setApps] = useState<TenantApp[]>(DEMO_APPS);
   const [toast, setToast] = useState<string | null>(null);
@@ -155,8 +163,10 @@ export default function ApplicationsClient() {
   const [joinOpen, setJoinOpen] = useState(false);
   const [joinCode, setJoinCode] = useState("");
 
-  // Chat button loading guard (prevents double-click race)
+  // Chat button loading guard
   const [chatBusyId, setChatBusyId] = useState<string | null>(null);
+  // Pay button loading guard
+  const [payBusyId, setPayBusyId] = useState<string | null>(null);
 
   // Filters
   type Tab = "all" | "in_progress" | "submitted" | "approved" | "rejected";
@@ -187,6 +197,9 @@ export default function ApplicationsClient() {
     })();
   }, []);
 
+  // any leased?
+  const leasedApp = useMemo(() => apps.find((a) => a.status === "leased") || null, [apps]);
+
   const filtered = useMemo(() => {
     let arr = [...apps];
     if (tab !== "all") {
@@ -195,7 +208,15 @@ export default function ApplicationsClient() {
       } else if (tab === "submitted") {
         arr = arr.filter((a) => ["in_review", "needs_approval"].includes(a.status));
       } else if (tab === "approved") {
-        arr = arr.filter((a) => a.status === "approved_pending_lease");
+        // do NOT include leased in "approved" — it's a final state
+        arr = arr.filter((a) =>
+          [
+            "approved_pending_lease",
+            "approved_pending_payment",
+            "approved_ready_to_lease",
+            "countersign_ready",     // ← NEW (still approved category)
+          ].includes(a.status)
+        );
       } else if (tab === "rejected") {
         arr = arr.filter((a) => a.status === "rejected");
       }
@@ -206,20 +227,65 @@ export default function ApplicationsClient() {
         [a.formName, a.property, a.unit, a.status].join(" ").toLowerCase().includes(t)
       );
     }
-    return arr.sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
+    return arr.sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || "")); // recent first
   }, [apps, tab, q]);
 
   function onJoin() {
     const code = joinCode.trim();
     if (!code) return setToast("Enter an invite code,");
-    window.location.href = `/tenant/apply?join=${encodeURIComponent(code)}`;
+    window.location.href = `/tenant/apply?form=${encodeURIComponent(code)}`;
+  }
+
+  // Pay hold / Payments: direct redirect to the payments page with appId
+  async function onPayHold(appId: string) {
+    if (payBusyId) return;
+    setPayBusyId(appId);
+    try {
+      // You can include firmId when available; for now appId is sufficient
+      const url = `/tenant/payments?appId=${encodeURIComponent(appId)}`;
+      window.location.href = url;
+    } catch {
+      setToast("Something went wrong starting your payment,");
+      setPayBusyId(null);
+    }
   }
 
   return (
     <>
-      {/* Top actions: only “Join with a code” */}
+      {/* Top actions */}
       <div className="mx-auto max-w-3xl px-4 sm:px-6">
+        {/* Strong nudge if they have a lease */}
+        {leasedApp && (
+          <div className="mt-4 mb-3 rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold text-emerald-900">You have an active lease</div>
+                <p className="mt-0.5 text-xs text-emerald-800">
+                  Manage move-in tasks, payments, and messages in your lease hub.
+                </p>
+              </div>
+              <Link
+                href={`/tenant/lease?app=${encodeURIComponent(leasedApp.id)}`}
+                className="rounded-md bg-emerald-600 px-3 py-2 text-xs font-medium text-white hover:bg-emerald-700"
+                aria-label="Go to your lease"
+              >
+                Go to your lease
+              </Link>
+            </div>
+          </div>
+        )}
+
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 sm:gap-3">
+          {/* Back to search */}
+          <Link
+            href="/tenant/applications/search"
+            className="rounded-lg border border-blue-300 bg-blue-50 text-blue-800 font-medium px-4 py-3 text-center hover:bg-blue-100 active:opacity-90"
+            aria-label="Back to application search"
+          >
+            Search For Applications
+          </Link>
+
+          {/* Join button */}
           <button
             onClick={() => setJoinOpen(true)}
             className="rounded-lg border border-gray-300 bg-white text-gray-900 font-medium px-4 py-3 hover:bg-gray-50 active:opacity-90"
@@ -227,8 +293,7 @@ export default function ApplicationsClient() {
             Join with a code
           </button>
 
-        {/* Keep grid spacing even on sm+ */}
-          <div className="rounded-lg border border-transparent px-4 py-3" />
+          {/* Spacer to keep grid balance on sm+ */}
           <div className="rounded-lg border border-transparent px-4 py-3" />
         </div>
 
@@ -287,80 +352,120 @@ export default function ApplicationsClient() {
           </div>
         ) : (
           <div className="space-y-3">
-            {filtered.map((a) => (
-              <div key={a.id} className="rounded-xl border border-gray-200 bg-white p-4">
-                <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="text-sm font-semibold text-gray-900 line-clamp-2">
-                      {a.formName}
+            {filtered.map((a) => {
+              const isPendingPayment = a.status === "approved_pending_payment";
+              const isCountersignReady = a.status === "countersign_ready"; // ← NEW
+              const isLeased = a.status === "leased";
+              const openLabel = isPendingPayment ? "Review" : "Open";
+
+              return (
+                <div key={a.id} className="rounded-xl border border-gray-200 bg-white p-4">
+                  <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-sm font-semibold text-gray-900 line-clamp-2">
+                        {a.formName}
+                      </div>
+                      <div className="text-xs text-gray-600 mt-0.5 truncate">
+                        {a.property ? `${a.property}${a.unit ? ` · Unit ${a.unit}` : ""}` : "Portfolio"}
+                      </div>
+                      <div className="mt-1 flex flex-wrap items-center gap-2">
+                        <StatusChip status={a.status} />
+                        <span className="text-[11px] text-gray-500">Updated {a.updatedAt}</span>
+                      </div>
                     </div>
-                    <div className="text-xs text-gray-600 mt-0.5 truncate">
-                      {a.property ? `${a.property}${a.unit ? ` · Unit ${a.unit}` : ""}` : "Portfolio"}
-                    </div>
-                    <div className="mt-1 flex flex-wrap items-center gap-2">
-                      <StatusChip status={a.status} />
-                      <span className="text-[11px] text-gray-500">Updated {a.updatedAt}</span>
-                    </div>
-                  </div>
 
-                  <div className="sm:text-right flex gap-2 sm:gap-3">
-                    <button
-                      disabled={chatBusyId === a.id}
-                      onClick={async () => {
-                        if (chatBusyId) return;
-                        setChatBusyId(a.id);
-                        try {
-                          const res = await fetch("/api/tenant/chat/open", {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ appId: a.id }),
-                          });
-                          const j = await res.json();
+                    <div className="sm:text-right flex gap-2 sm:gap-3">
+                      {/* If leased, strongly direct to lease hub */}
+                      {isLeased ? (
+                        <Link
+                          href={`/tenant/lease?app=${encodeURIComponent(a.id)}`}
+                          className="inline-flex justify-center rounded-md bg-emerald-600 text-white text-sm font-medium px-3 py-2 hover:bg-emerald-700 active:opacity-90"
+                          title="View your lease"
+                        >
+                          View lease
+                        </Link>
+                      ) : (
+                        <>
+                          {/* Chat */}
+                          <button
+                            disabled={chatBusyId === a.id}
+                            onClick={async () => {
+                              if (chatBusyId) return;
+                              setChatBusyId(a.id);
+                              try {
+                                const res = await fetch("/api/tenant/chat/open", {
+                                  method: "POST",
+                                  headers: { "Content-Type": "application/json" },
+                                  body: JSON.stringify({ appId: a.id }),
+                                });
+                                const j = await res.json();
 
-                          if (!res.ok || !j?.ok) {
-                            console.error("open chat failed:", j);
-                            setChatBusyId(null);
-                            return;
-                          }
+                                if (!res.ok || !j?.ok) {
+                                  setChatBusyId(null);
+                                  return;
+                                }
 
-                          const threadId = j.threadId ? String(j.threadId) : "";
-                          const url =
-                            (j.redirect && typeof j.redirect === "string" && j.redirect.includes("/tenant/chat/"))
-                              ? j.redirect
-                              : threadId
-                              ? `/tenant/chat/${encodeURIComponent(threadId)}`
-                              : null;
+                                const threadId = j.threadId ? String(j.threadId) : "";
+                                const url =
+                                  (j.redirect && typeof j.redirect === "string" && j.redirect.includes("/tenant/chat/"))
+                                    ? j.redirect
+                                    : threadId
+                                    ? `/tenant/chat/${encodeURIComponent(threadId)}`
+                                    : null;
 
-                          if (!url) {
-                            console.error("No redirect or threadId in response:", j);
-                            setChatBusyId(null);
-                            return;
-                          }
+                                if (!url) {
+                                  setChatBusyId(null);
+                                  return;
+                                }
 
-                          window.location.href = url; // navigates to /tenant/chat/[threadId]
-                        } catch (e) {
-                          console.error("open chat exception:", e);
-                          setChatBusyId(null);
-                        }
-                      }}
-                      className={clsx(
-                        "inline-flex justify-center rounded-md border border-gray-300 bg-white text-sm font-medium px-3 py-2 text-gray-900 hover:bg-gray-50 active:opacity-90",
-                        chatBusyId === a.id && "opacity-60 cursor-not-allowed"
+                                window.location.href = url;
+                              } catch {
+                                setChatBusyId(null);
+                              }
+                            }}
+                            className={clsx(
+                              "inline-flex justify-center rounded-md border border-gray-300 bg-white text-sm font-medium px-3 py-2 text-gray-900 hover:bg-gray-50 active:opacity-90",
+                              chatBusyId === a.id && "opacity-60 cursor-not-allowed"
+                            )}
+                          >
+                            {chatBusyId === a.id ? "Opening…" : "Chat"}
+                          </button>
+
+                          {/* Open/Review application */}
+                          <Link
+                            href={`/tenant/apply?form=${encodeURIComponent(a.formId)}&app=${encodeURIComponent(a.id)}`}
+                            className="inline-flex justify-center rounded-md bg-gray-900 text-white text-sm font-medium px-3 py-2 hover:bg-black active:opacity-90"
+                          >
+                            {openLabel}
+                          </Link>
+
+                          {/* Payments button:
+                              - show for approved_pending_payment (legacy hold)
+                              - show for countersign_ready (graceful path to payments before lease exists) */}
+                          {(isPendingPayment || isCountersignReady) && (
+                            <button
+                              disabled={payBusyId === a.id}
+                              onClick={() => onPayHold(a.id)}
+                              className={clsx(
+                                "inline-flex justify-center rounded-md border border-blue-300 bg-blue-50 text-blue-800 text-sm font-medium px-3 py-2 hover:bg-blue-100 active:opacity-90",
+                                payBusyId === a.id && "opacity-60 cursor-not-allowed"
+                              )}
+                              title={isCountersignReady ? "Go to payments" : "Go to your holding payment"}
+                            >
+                              {payBusyId === a.id
+                                ? "Starting…"
+                                : isCountersignReady
+                                ? "Payments"
+                                : "Pay hold"}
+                            </button>
+                          )}
+                        </>
                       )}
-                    >
-                      {chatBusyId === a.id ? "Opening…" : "Chat"}
-                    </button>
-
-                    <Link
-                      href={`/tenant/apply?form=${encodeURIComponent(a.formId)}&app=${encodeURIComponent(a.id)}`}
-                      className="inline-flex justify-center rounded-md bg-gray-900 text-white text-sm font-medium px-3 py-2 hover:bg-black active:opacity-90"
-                    >
-                      Open
-                    </Link>
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

@@ -14,7 +14,11 @@ type MemberRole = "primary" | "co_applicant" | "cosigner";
 function toStringId(v: any): string {
   if (!v) return "";
   if (typeof v === "string") return v;
-  try { return v?.toHexString ? v.toHexString() : String(v); } catch { return String(v); }
+  try {
+    return v?.toHexString ? v.toHexString() : String(v);
+  } catch {
+    return String(v);
+  }
 }
 
 async function pickMembershipsCol(db: any) {
@@ -30,16 +34,105 @@ async function pickMembershipsCol(db: any) {
   return db.collection("households_membership");
 }
 
-async function resolveMyHouseholdId(db: any, user: any): Promise<string | null> {
+/** Resolve most-recent membership for the user (any household). */
+async function resolveMyMembership(db: any, user: any): Promise<null | {
+  membershipId: string;
+  householdId: string | null;
+  email: string;
+  role: MemberRole;
+  active?: boolean;
+}> {
   const col = await pickMembershipsCol(db);
   const emailLc = String(user?.email ?? "").toLowerCase();
   const userId = toStringId((user as any).id ?? (user as any)._id ?? (user as any).userId ?? emailLc);
   const row = await col
-    .find({ $or: [{ userId }, { email: emailLc }, { email: (user as any).email }] })
+    .find({
+      $or: [{ userId }, { email: emailLc }, { email: (user as any).email }],
+    })
     .sort({ active: -1, joinedAt: -1 })
     .limit(1)
     .next();
-  return row ? toStringId(row.householdId) : null;
+
+  if (!row) return null;
+  const r = String(row.role || "co_applicant").toLowerCase();
+  const role: MemberRole = r === "primary" || r === "cosigner" ? (r as MemberRole) : "co_applicant";
+  return {
+    membershipId: toStringId(row._id),
+    householdId: row.householdId ? toStringId(row.householdId) : null,
+    email: String(row.email || emailLc),
+    role,
+  };
+}
+
+/** Resolve membership specifically within a given householdId. */
+async function resolveMyMembershipForHousehold(
+  db: any,
+  user: any,
+  householdId: string | null | undefined
+): Promise<null | {
+  membershipId: string;
+  householdId: string | null;
+  email: string;
+  role: MemberRole;
+  active?: boolean;
+}> {
+  if (!householdId) return null;
+  const col = await pickMembershipsCol(db);
+  const emailLc = String(user?.email ?? "").toLowerCase();
+  const userId = toStringId((user as any).id ?? (user as any)._id ?? (user as any).userId ?? emailLc);
+
+  const row = await col
+    .find({
+      householdId,
+      $or: [{ userId }, { email: emailLc }, { email: (user as any).email }],
+    })
+    .sort({ active: -1, joinedAt: -1 })
+    .limit(1)
+    .next();
+
+  if (!row) return null;
+  const r = String(row.role || "co_applicant").toLowerCase();
+  const role: MemberRole = r === "primary" || r === "cosigner" ? (r as MemberRole) : "co_applicant";
+  return {
+    membershipId: toStringId(row._id),
+    householdId: row.householdId ? toStringId(row.householdId) : null,
+    email: String(row.email || emailLc),
+    role,
+  };
+}
+
+async function resolveMyHouseholdId(db: any, user: any): Promise<string | null> {
+  const m = await resolveMyMembership(db, user);
+  return m?.householdId ?? null;
+}
+
+/** Build a map of membershipId -> userId for a household (and inverse) */
+async function buildMembershipMaps(db: any, householdId: string | null) {
+  const membershipsCol = await pickMembershipsCol(db);
+  const mapM2U = new Map<string, string>();
+  const mapU2M = new Map<string, string>();
+  if (!householdId) return { mapM2U, mapU2M };
+  const cursor = membershipsCol.find({ householdId });
+  for await (const m of cursor as any) {
+    const mid = toStringId(m._id);
+    const uid = toStringId(m.userId);
+    if (mid && uid) {
+      mapM2U.set(mid, uid);
+      mapU2M.set(uid, mid);
+    }
+  }
+  return { mapM2U, mapU2M };
+}
+
+/** If client sends a membershipId, convert to userId; otherwise passthrough. */
+async function normalizeMemberKeyToUserId(
+  db: any,
+  candidate: string | null | undefined,
+  householdId: string | null
+): Promise<string | null> {
+  if (!candidate) return null;
+  const { mapM2U } = await buildMembershipMaps(db, householdId);
+  return mapM2U.get(candidate) ?? candidate;
 }
 
 async function getIdFromParamsOrUrl(
@@ -57,6 +150,8 @@ async function getIdFromParamsOrUrl(
 
 /* ============================================================
    GET /api/tenant/applications/[id]
+   - Returns app.me.memberId as the USER ID (canonical key)
+   - Also re-keys answersByMember in the response to userId keys when possible
 ============================================================ */
 export async function GET(
   req: NextRequest,
@@ -87,17 +182,22 @@ export async function GET(
       updatedAt: 1,
       submittedAt: 1,
       answers: 1,
+      answersByMember: 1,
       members: 1,
     },
   });
   if (!app) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
 
-  // Auth by household, with legacy back-compat
-  const myHouseholdId = await resolveMyHouseholdId(db, user);
+  const appHid: string | null = app.householdId ? String(app.householdId) : null;
+
+  // Resolve household-specific membership (for role/email), but we'll use userId as the canonical key
+  let myMembership = await resolveMyMembershipForHousehold(db, user, appHid);
+  if (!myMembership) myMembership = await resolveMyMembership(db, user);
+
+  // Auth by household / legacy
+  const myHouseholdId = myMembership?.householdId ?? (await resolveMyHouseholdId(db, user));
   const emailLc = String(user.email ?? "").toLowerCase();
   const userId = toStringId((user as any).id ?? (user as any)._id ?? (user as any).userId ?? emailLc);
-
-  const appHid = app.householdId ? String(app.householdId) : null;
 
   let allowed = false;
   let reason = "none";
@@ -125,6 +225,44 @@ export async function GET(
     );
   }
 
+  // Build membershipId -> userId map for re-keying
+  const { mapM2U } = await buildMembershipMaps(db, appHid);
+
+  // Re-key answersByMember to userId keys for the response (non-destructive; not persisted here)
+  let answersByMemberOut: Record<
+    string,
+    { role: MemberRole; email: string; answers: Record<string, any> }
+  > | undefined = undefined;
+
+  if (app.answersByMember && typeof app.answersByMember === "object") {
+    answersByMemberOut = {};
+    for (const [k, v] of Object.entries(app.answersByMember as Record<string, any>)) {
+      const userKey = mapM2U.get(k) ?? k; // translate membershipId -> userId when known
+      const prev = answersByMemberOut[userKey];
+      if (!prev) {
+        answersByMemberOut[userKey] = {
+          role: (v?.role ?? "co_applicant") as MemberRole,
+          email: String(v?.email ?? "").toLowerCase(),
+          answers: { ...(v?.answers ?? {}) },
+        };
+      } else {
+        // Merge if two keys collapse to same user (prefer newer fields, shallow merge)
+        answersByMemberOut[userKey] = {
+          role: (v?.role ?? prev.role) as MemberRole,
+          email: String(v?.email || prev.email || "").toLowerCase(),
+          answers: { ...prev.answers, ...(v?.answers ?? {}) },
+        };
+      }
+    }
+  }
+
+  // Provide "me" with memberId set to USER ID (canonical)
+  const me = {
+    memberId: userId, // canonical key for answersByMember
+    email: myMembership?.email ?? emailLc,
+    role: (myMembership?.role ?? "co_applicant") as MemberRole,
+  };
+
   return NextResponse.json({
     ok: true,
     app: {
@@ -134,17 +272,18 @@ export async function GET(
       householdId: appHid ?? undefined,
       updatedAt: app.updatedAt ?? null,
       submittedAt: app.submittedAt ?? null,
+      answersByMember: answersByMemberOut ?? undefined,
+      answers: app.answers ?? undefined, // legacy
+      me,
     },
-    debug: dbg({ myHouseholdId, appHid, reason }),
+    debug: dbg({ myHouseholdId, appHid, reason, me }),
   });
 }
 
 /* ============================================================
    PATCH /api/tenant/applications/[id]
-   Body:
-     { status: AppStatus }
-   OR
-     { updates: [{ role, qid, value }, ...] }
+   - Accepts memberId as either userId (preferred) or membershipId
+   - Normalizes to userId when writing answersByMember.<userId>.*
 ============================================================ */
 export async function PATCH(
   req: NextRequest,
@@ -159,6 +298,7 @@ export async function PATCH(
 
   const db = await getDb();
   const appsCol = db.collection("applications");
+  const membershipsCol = await pickMembershipsCol(db);
   const { ObjectId } = await import("mongodb");
 
   const appId = await getIdFromParamsOrUrl(req, (ctx as any).params);
@@ -168,25 +308,28 @@ export async function PATCH(
     /^[0-9a-fA-F]{24}$/.test(appId) ? { _id: new ObjectId(appId) } : ({ _id: appId } as any);
 
   const app = await appsCol.findOne(filter, {
-    projection: { formId: 1, status: 1, householdId: 1, members: 1 },
+    projection: { formId: 1, status: 1, householdId: 1, members: 1, answersByMember: 1 },
   });
   if (!app) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
 
-  // Auth by household, with back-compat
-  const myHouseholdId = await resolveMyHouseholdId(db, user);
+  const appHid: string | null = app.householdId ? String(app.householdId) : null;
+
+  // Resolve membership within this app's household first (for role/email),
+  // but canonical key will be userId
+  let myMembership = await resolveMyMembershipForHousehold(db, user, appHid);
+  if (!myMembership) myMembership = await resolveMyMembership(db, user);
+
   const emailLc = String(user.email ?? "").toLowerCase();
   const userId = toStringId((user as any).id ?? (user as any)._id ?? (user as any).userId ?? emailLc);
-
-  const appHid = app.householdId ? String(app.householdId) : null;
 
   let allowed = false;
   let reason = "none";
 
-  if (appHid && myHouseholdId && appHid === myHouseholdId) {
+  if (appHid && myMembership?.householdId && appHid === myMembership.householdId) {
     allowed = true;
     reason = "household_match";
-  } else if (!appHid && myHouseholdId) {
-    await appsCol.updateOne(filter, { $set: { householdId: myHouseholdId } });
+  } else if (!appHid && myMembership?.householdId) {
+    await appsCol.updateOne(filter, { $set: { householdId: myMembership.householdId } });
     allowed = true;
     reason = "household_attached";
   } else if (!allowed && Array.isArray(app.members) && app.members.length) {
@@ -201,7 +344,7 @@ export async function PATCH(
 
   if (!allowed) {
     return NextResponse.json(
-      { ok: false, error: "forbidden", debug: dbg({ myHouseholdId, appHid, reason }) },
+      { ok: false, error: "forbidden", debug: dbg({ myHouseholdId: myMembership?.householdId ?? null, appHid, reason }) },
       { status: 403 }
     );
   }
@@ -227,18 +370,54 @@ export async function PATCH(
 
   // Debounced answer updates
   if (Array.isArray(body?.updates) && body.updates.length > 0) {
-    type Up = { role: MemberRole | string; qid: string; value: any };
+    type Up =
+      | { memberId?: string; email?: string; role?: MemberRole | string; qid: string; value: any }
+      | { role?: MemberRole | string; qid: string; value: any }; // legacy
+
     const updates: Up[] = body.updates as Up[];
 
-    // Build $set paths like "answers.primary.q_email": "foo"
-    const setPaths: Record<string, any> = {};
-    for (const u of updates) {
-      const rawRole = String((u as any).role ?? "").toLowerCase();
-      const r: MemberRole =
-        rawRole === "co_applicant" || rawRole === "cosigner" ? (rawRole as MemberRole) : "primary";
+    // Defaults for "me"
+    const defaultUserId = userId; // canonical
+    const defaultRole = myMembership?.role ?? "co_applicant";
+    const defaultEmail = myMembership?.email ?? emailLc;
 
-      const qid = String(u.qid);
-      setPaths[`answers.${r}.${qid}`] = u.value;
+    // Build membership maps once for normalization
+    const { mapM2U } = await buildMembershipMaps(db, appHid);
+
+    const setPaths: Record<string, any> = {};
+
+    for (const u of updates) {
+      const qid = String((u as any).qid);
+      if (!qid) continue;
+
+      // Incoming memberId could be: userId (preferred) or membershipId (old clients).
+      let incoming = String((u as any).memberId || "");
+      let memberUserId: string;
+
+      if (incoming) {
+        memberUserId = mapM2U.get(incoming) ?? incoming; // normalize to userId when possible
+      } else {
+        memberUserId = defaultUserId;
+      }
+
+      const rawRole = String((u as any).role ?? defaultRole ?? "co_applicant").toLowerCase();
+      const role: MemberRole =
+        rawRole === "primary" || rawRole === "cosigner" ? (rawRole as MemberRole) : "co_applicant";
+      const emailForSnap = String((u as any).email || defaultEmail || "").toLowerCase();
+
+      if (memberUserId) {
+        setPaths[`answersByMember.${memberUserId}.role`] = role;
+        if (emailForSnap) setPaths[`answersByMember.${memberUserId}.email`] = emailForSnap;
+        setPaths[`answersByMember.${memberUserId}.answers.${qid}`] = (u as any).value;
+        continue;
+      }
+
+      // Legacy shape (no memberId at all → keep legacy answers.<role>.<qid>)
+      setPaths[`answers.${role}.${qid}`] = (u as any).value;
+    }
+
+    if (Object.keys(setPaths).length === 0) {
+      return NextResponse.json({ ok: true, noop: true, debug: dbg({ reason, count: 0 }) });
     }
 
     const upd = await appsCol.updateOne(filter, {

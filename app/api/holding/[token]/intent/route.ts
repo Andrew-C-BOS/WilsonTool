@@ -13,6 +13,7 @@ function baseOrigin(req: Request) {
   const h = (req as any).headers;
   return h.get("origin") || process.env.NEXT_PUBLIC_BASE_URL || "http://localhost:3000";
 }
+
 async function getTokenParam(req: NextRequest, ctx: { params?: any }) {
   try {
     const p = await (ctx as any)?.params;
@@ -40,15 +41,26 @@ export async function POST(
   const token = await getTokenParam(req, ctx);
 
   try {
+    const secret = process.env.STRIPE_SECRET_KEY;
+    if (!secret) {
+      return NextResponse.json({ ok: false, error: "stripe_not_configured" }, { status: 500 });
+    }
     // Use account default API version
-    const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
+    const stripe = new Stripe(secret);
 
     const db = await getDb();
     const holds = db.collection("holding_requests");
-    // Type the firms collection so _id accepts either ObjectId or string
-    const firms = db.collection<{ _id: string | ObjectId; stripeAccountId?: string; stripeStatus?: string }>("firms");
+    const firms = db.collection<{
+      _id: string | ObjectId;
+      stripe?: {
+        operatingAccountId?: string;
+        operatingStatus?: string;
+        escrowAccountId?: string;
+        escrowStatus?: string;
+      };
+    }>("firms");
 
-    // Load hold + firm
+    // 1) Load hold
     const hold = await holds.findOne(
       { token },
       { projection: { _id: 1, total: 1, minimumDue: 1, status: 1, paymentIntentId: 1, firmId: 1 } }
@@ -57,21 +69,40 @@ export async function POST(
       return NextResponse.json({ ok: false, error: "invalid_or_paid" }, { status: 400 });
     }
 
-    // Support firmId stored as string or ObjectId
+    // 2) Load firm; support string or ObjectId ids
     const firmIdStr = String(hold.firmId);
     const firmId: string | ObjectId = ObjectId.isValid(firmIdStr) ? new ObjectId(firmIdStr) : firmIdStr;
 
     const firm = await firms.findOne(
       { _id: firmId },
-      { projection: { stripeAccountId: 1, stripeStatus: 1 } }
+      { projection: { "stripe.operatingAccountId": 1, "stripe.operatingStatus": 1 } }
     );
-    if (!firm?.stripeAccountId) {
-      return NextResponse.json({ ok: false, error: "no_stripe_account" }, { status: 400 });
-    }
-    if (firm.stripeStatus && firm.stripeStatus !== "active") {
-      return NextResponse.json({ ok: false, error: "account_not_active" }, { status: 400 });
+
+    const operatingAccountId = firm?.stripe?.operatingAccountId;
+    if (!operatingAccountId) {
+      return NextResponse.json({ ok: false, error: "no_operating_account" }, { status: 400 });
     }
 
+    // 2b) Live-check the destination account on Stripe instead of DB cache
+    const acct = await stripe.accounts.retrieve(operatingAccountId);
+    const transfersCap = acct.capabilities?.transfers;
+    if (transfersCap !== "active") {
+      // Payouts can be enabled later; we only enforce transfers capability for destination charges
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "operating_destination_not_ready",
+          details: {
+            transfersCapability: transfersCap ?? "unknown",
+            payoutsEnabled: !!acct.payouts_enabled,
+            chargesEnabled: !!acct.charges_enabled,
+          },
+        },
+        { status: 400 }
+      );
+    }
+
+    // 3) Amount
     const amount = Number(hold.minimumDue ?? hold.total) || 0;
     if (!Number.isFinite(amount) || amount <= 0) {
       return NextResponse.json({ ok: false, error: "bad_amount" }, { status: 400 });
@@ -87,7 +118,7 @@ export async function POST(
       status === "requires_confirmation" ||
       status === "requires_action";
 
-    // ── Reuse-first: if a confirmable ACH-only PI with the same amount exists, reuse it ──
+    // 4) Reuse-first: if a confirmable ACH-only PI with the same amount exists, reuse it
     if (hold.paymentIntentId) {
       try {
         const existing = await stripe.paymentIntents.retrieve(hold.paymentIntentId);
@@ -103,39 +134,44 @@ export async function POST(
           });
         }
 
-        // Cancel only if it's cancelable AND (wrong methods OR wrong amount).
+        // Cancel only if cancelable AND (wrong methods OR wrong amount)
         if (CANCELABLE.has(existing.status as any) && (!isAchOnly(existing) || !sameAmount)) {
           try {
             await stripe.paymentIntents.cancel(existing.id);
           } catch {
-            // swallow, we'll replace anyway
+            /* ignore */
           }
         }
-        // If it's 'processing', 'succeeded', or 'canceled', don't cancel; just proceed to create new.
       } catch {
         // "no such PI" — proceed to create new
       } finally {
-        // Clear the stored id before creating a new PI
+        // Clear stored id before creating a new PI to avoid stale reuse
         await holds.updateOne({ _id: hold._id }, { $unset: { paymentIntentId: "" } });
       }
     }
 
-    // ── Create NEW ACH-only PaymentIntent as a Destination charge (no on_behalf_of) ──
+    // 5) Create NEW ACH-only PaymentIntent as a Destination charge to OPERATING account
     const pi = await stripe.paymentIntents.create(
       {
         amount,
         currency: "usd",
-        description: `Holding payment ${hold._id} (dest)`,
+        description: `Holding payment ${hold._id} (operating dest)`,
         payment_method_types: ["us_bank_account"],
         payment_method_options: {
           us_bank_account: { verification_method: "automatic" },
         },
-        transfer_data: { destination: firm.stripeAccountId },
-        metadata: { holdingId: String(hold._id), firmId: String(hold.firmId), token },
+        transfer_data: { destination: operatingAccountId },
+        metadata: {
+          holdingId: String(hold._id),
+          firmId: String(hold.firmId),
+          token,
+          route: "operating",
+        },
       },
-      { idempotencyKey: `hold:${hold._id}:${amount}:ach-destination-v2` }
+      { idempotencyKey: `hold:${hold._id}:${amount}:ach-destination-operating-v2` }
     );
 
+    // 6) Persist PI id
     await holds.updateOne(
       { _id: hold._id },
       { $set: { paymentIntentId: pi.id, updatedAt: new Date() } }

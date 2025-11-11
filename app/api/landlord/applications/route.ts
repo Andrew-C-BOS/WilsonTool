@@ -83,11 +83,12 @@ async function resolveFirmForUser(req: NextRequest, user: { _id: string }) {
 
 /* ---------- Types your UI expects ---------- */
 type MemberRole = "primary" | "co-applicant" | "cosigner";
-type AppStatus = "new" | "in_review" | "needs_approval" | "approved_pending_lease" | "rejected";
+// IMPORTANT: allow any backend string; don’t down-convert new states
+type AppStatus = string;
 
 type HouseholdUI = {
   id: string;          // householdId (group id)
-  appId: string;       // <-- NEW: application _id (required by Chat open API)
+  appId: string;       // application _id (required by Chat open)
   property: string;
   unit: string;
   submittedAt: string; // ISO
@@ -98,30 +99,35 @@ type HouseholdUI = {
     role: MemberRole;
     state?: "invited" | "complete" | "missing_docs";
   }[];
+  // Optional helpers (not required by UI, but nice to have)
+  nextStep?: string | null;
+  heldUntil?: string | null;
 };
 
-/* ---------- Normalization helpers ---------- */
+/* ---------- Normalization & formatting helpers ---------- */
 function normalizeRole(v: any): MemberRole {
   const s = String(v ?? "").toLowerCase().replace("_", "-");
   if (s === "primary" || s === "co-applicant" || s === "cosigner") return s as MemberRole;
   if (v === true) return "primary";
   return "co-applicant";
 }
+
+/**
+ * Preserve modern states like "accepted_held" and any future "approved_*".
+ * Fallback to the legacy map only when we truly can’t infer.
+ */
 function normalizeStatus(v: any): AppStatus {
   const s = String(v ?? "").toLowerCase();
-  const map: Record<string, AppStatus> = {
-    new: "new",
-    pending: "in_review",
-    review: "in_review",
-    in_review: "in_review",
-    needs_approval: "needs_approval",
-    approved: "approved_pending_lease",
-    approved_pending_lease: "approved_pending_lease",
-    reject: "rejected",
-    rejected: "rejected",
-  };
-  return map[s] ?? "in_review";
+  if (!s) return "in_review";
+  if (s === "accepted_held") return "accepted_held";
+  if (s.startsWith("approved_")) return s;
+  if (["new", "in_review", "needs_approval", "rejected"].includes(s)) return s;
+  if (["pending", "review"].includes(s)) return "in_review";
+  if (["approved"].includes(s)) return "approved_pending_lease";
+  if (["reject"].includes(s)) return "rejected";
+  return s; // last resort: pass through unknowns so the UI can learn them
 }
+
 function toISO(x: any): string {
   if (!x) return "";
   if (typeof x === "object" && x.$date) {
@@ -133,76 +139,81 @@ function toISO(x: any): string {
   return isNaN(d.getTime()) ? "" : d.toISOString();
 }
 
-/** household/group id (prefer explicit householdId before _id) */
-function getId(raw: any): string | null {
-  const candidate = raw.id ?? raw.hhId ?? raw.householdId ?? raw.applicationGroupId ?? raw._id ?? null;
-  if (!candidate) return null;
-  if (typeof candidate === "object" && (candidate as any).$oid) return String((candidate as any).$oid);
-  return String(candidate);
+function formatProperty(building: any, fallback: any): string {
+  const b = building && typeof building === "object" ? building : undefined;
+  if (b) {
+    const parts = [
+      b.addressLine1,
+      b.addressLine2,
+      [b.city, b.state].filter(Boolean).join(", "),
+      b.postalCode,
+    ].filter(Boolean);
+    const s = parts.join(" • ");
+    if (s) return s;
+  }
+  const propName =
+    fallback?.name ??
+    fallback?.title ??
+    fallback ??
+    "—";
+  return String(propName || "—");
 }
 
-/** application id resolver (robust across sources) */
-function getAppId(raw: any): string | null {
-  const candidate =
-    raw?.appId ??
-    raw?.applicationId ??
-    raw?.application_id ??
-    (raw?._id ?? null);
-  if (!candidate) return null;
-  if (typeof candidate === "object" && (candidate as any).$oid) return String((candidate as any).$oid);
-  return String(candidate);
+function formatUnit(unit: any): string {
+  const u = unit && typeof unit === "object" ? unit : undefined;
+  if (!u) return typeof unit === "string" ? unit : "—";
+  const label = [
+    u.unitNumber && `Unit ${u.unitNumber}`,
+    u.beds != null && `${u.beds}bd`,
+    u.baths != null && `${u.baths}ba`,
+  ].filter(Boolean).join(" · ");
+  return label || (u.label ? String(u.label) : "—");
 }
 
-function coerce(raw: any): HouseholdUI | null {
-  if (!raw) return null;
+const val = (s: unknown): string | undefined => {
+  const t = typeof s === "string" ? s : s == null ? undefined : String(s);
+  return t && t.trim() ? t : undefined;
+};
 
-  const id = getId(raw); // household/group id
-  const appId = getAppId(raw); // application id
-  if (!id || !appId) return null;
+function synthesizeMembers(rawMembers: any[] | undefined, answersByMember: any | undefined) {
+  const out: Array<{name: string; email: string; role: MemberRole; state?: "invited" | "complete" | "missing_docs"}> = [];
 
-  const property =
-    raw.property?.name ??
-    raw.propertyName ??
-    raw.property_title ??
-    raw.property ??
-    "—";
-  const unit =
-    raw.unit?.label ??
-    raw.unitLabel ??
-    raw.unitNumber ??
-    raw.unit_name ??
-    raw.unit ??
-    "—";
+  if (Array.isArray(rawMembers) && rawMembers.length) {
+    for (const m of rawMembers) {
+      const name =
+        val(m?.name) ??
+        val(m?.fullName) ??
+        (val(m?.firstName) && val(m?.lastName) ? `${m.firstName} ${m.lastName}` : undefined) ??
+        val(m?.email) ??
+        "—";
+      const email = val(m?.email) ?? "—";
+      const state = ((): "invited" | "complete" | "missing_docs" | undefined => {
+        if (m?.state) return m.state;
+        if (m?.complete) return "complete";
+        if (m?.missingDocuments) return "missing_docs";
+        return undefined;
+      })();
+      const role = normalizeRole(m?.role ?? m?.type ?? (m?.isPrimary ? "primary" : undefined));
+      out.push({ name: name!, email, role, state });
+    }
+    return out;
+  }
 
-  const submittedAt = toISO(raw.submittedAt ?? raw.createdAt ?? raw.updatedAt ?? raw.reviewStartedAt);
-  const status = normalizeStatus(raw.status ?? raw.workflowStatus ?? raw.state ?? raw.phase);
+  // fallback: infer from answersByMember
+  if (answersByMember && typeof answersByMember === "object") {
+    for (const [, bucket] of Object.entries<any>(answersByMember)) {
+      const email = val(bucket?.email) ?? "—";
+      const name =
+        val(bucket?.answers?.q_name) ??
+        val(bucket?.answers?.name) ??
+        email ??
+        "—";
+      const role = normalizeRole(bucket?.role);
+      out.push({ name: name!, email, role });
+    }
+  }
 
-  const membersRaw: any[] =
-    (Array.isArray(raw.members) && raw.members) ||
-    (Array.isArray(raw.applicants) && raw.applicants) ||
-    (Array.isArray(raw.people) && raw.people) ||
-    [];
-
-  const members = membersRaw.map((m) => {
-    const name =
-      m.name ??
-      m.fullName ??
-      (m.firstName && m.lastName ? `${m.firstName} ${m.lastName}` : "");
-    const email = m.email ?? m.mail ?? "";
-    const state = m.state ?? (m.complete ? "complete" : m.missingDocuments ? "missing_docs" : undefined);
-    const role = normalizeRole(m.role ?? m.type ?? (m.isPrimary ? "primary" : undefined));
-    return { name: name || email || "—", email: email || "—", role, state };
-  });
-
-  return {
-    id,
-    appId,      // <-- include application id for chat open
-    property: String(property || "—"),
-    unit: String(unit || "—"),
-    submittedAt,
-    status,
-    members,
-  };
+  return out;
 }
 
 /* ---------- Cursor helpers ---------- */
@@ -240,7 +251,6 @@ async function selectViaMongo(desired: number, firmId: string): Promise<Househol
     .limit(2000)
     .toArray();
 
-  // For robustness, include both string and ObjectId candidates
   const formIdCandidates: (string | ObjectId)[] = formIdDocs.flatMap((x: any) => {
     const s = String(x._id);
     return ObjectId.isValid(s) ? [s, new ObjectId(s)] : [s];
@@ -253,7 +263,6 @@ async function selectViaMongo(desired: number, firmId: string): Promise<Househol
 
   const docs: any[] = await apps
     .find(query, {
-      // Make sure typical fields are available; projection is optional here
       projection: {
         _id: 1,
         householdId: 1,
@@ -265,6 +274,10 @@ async function selectViaMongo(desired: number, firmId: string): Promise<Househol
         members: 1,
         property: 1,
         unit: 1,
+        building: 1,            // ← include building so we can format property
+        answersByMember: 1,     // ← synthesize members if needed
+        locks: 1,               // ← expose heldUntil if a lock exists
+        nextStep: 1,            // ← optional helper
       },
     })
     .sort({ submittedAt: -1, createdAt: -1, updatedAt: -1, _id: -1 })
@@ -272,7 +285,40 @@ async function selectViaMongo(desired: number, firmId: string): Promise<Househol
     .toArray();
 
   if (!docs?.length) return null;
-  return docs.map(coerce).filter(Boolean) as HouseholdUI[];
+
+  const rows: HouseholdUI[] = docs.map((raw: any) => {
+    const id =
+      (raw?.householdId && (typeof raw.householdId === "object" && raw.householdId.$oid ? String(raw.householdId.$oid) : String(raw.householdId))) ||
+      String(raw._id);
+    const appId = String(raw._id);
+
+    const property = formatProperty(raw.building, raw.property);
+    const unitLabel = formatUnit(raw.unit);
+
+    const submittedAt = toISO(raw.submittedAt ?? raw.createdAt ?? raw.updatedAt);
+    const status = normalizeStatus(raw.status);
+
+    const members = synthesizeMembers(raw.members, raw.answersByMember);
+
+    const heldUntil =
+      raw?.locks?.holding?.active && raw?.locks?.holding?.until
+        ? toISO(raw.locks.holding.until)
+        : null;
+
+    return {
+      id,
+      appId,
+      property,
+      unit: unitLabel,
+      submittedAt,
+      status,
+      members,
+      nextStep: raw?.nextStep ?? null,
+      heldUntil,
+    };
+  });
+
+  return rows;
 }
 
 /** Optional fallback: Prisma; we try common firm keys, safely, catch on schema mismatch. */
@@ -306,11 +352,25 @@ async function selectViaPrisma(desired: number, firmId: string): Promise<Househo
             });
             if (rows?.length) {
               await prisma.$disconnect().catch(() => {});
-              return rows.map(coerce).filter(Boolean) as HouseholdUI[];
+              return rows
+                .map((r) => {
+                  // adapt prisma shapes
+                  const submittedAt = toISO(r.submittedAt ?? r.createdAt ?? r.updatedAt);
+                  return {
+                    id: String(r.householdId ?? r.groupId ?? r.id),
+                    appId: String(r.applicationId ?? r.id),
+                    property: formatProperty(r.building ?? r.property, r.property),
+                    unit: formatUnit(r.unit),
+                    submittedAt,
+                    status: normalizeStatus(r.status ?? r.workflowStatus ?? r.state ?? r.phase),
+                    members: synthesizeMembers(r.members ?? r.applicants ?? r.people, undefined),
+                    nextStep: r?.nextStep ?? null,
+                    heldUntil: r?.locks?.holding?.active && r?.locks?.holding?.until ? toISO(r.locks.holding.until) : null,
+                  } as HouseholdUI;
+                })
+                .filter(Boolean);
             }
-          } catch {
-            // try next key / ordering
-          }
+          } catch {}
         }
       }
     }
@@ -343,7 +403,21 @@ async function selectViaCollections(desired: number, firmId: string): Promise<Ho
           const filtered = Array.isArray(docs)
             ? docs.filter((d: any) => d?.firmId === firmId || d?.firm === firmId || d?.form?.firmId === firmId)
             : [];
-          if (filtered.length) return filtered.map(coerce).filter(Boolean) as HouseholdUI[];
+          if (filtered.length) {
+            return filtered.map((raw: any) => {
+              return {
+                id: String(raw.householdId ?? raw.id ?? raw._id),
+                appId: String(raw._id ?? raw.appId ?? raw.applicationId),
+                property: formatProperty(raw.building ?? raw.property, raw.property),
+                unit: formatUnit(raw.unit),
+                submittedAt: toISO(raw.submittedAt ?? raw.createdAt ?? raw.updatedAt),
+                status: normalizeStatus(raw.status ?? raw.workflowStatus ?? raw.state ?? raw.phase),
+                members: synthesizeMembers(raw.members ?? raw.applicants ?? raw.people, raw.answersByMember),
+                nextStep: raw?.nextStep ?? null,
+                heldUntil: raw?.locks?.holding?.active && raw?.locks?.holding?.until ? toISO(raw.locks.holding.until) : null,
+              } as HouseholdUI;
+            }).filter(Boolean);
+          }
         }
 
         // Array export
@@ -351,12 +425,21 @@ async function selectViaCollections(desired: number, firmId: string): Promise<Ho
           const filtered = (col as any[]).filter(
             (d) => d?.firmId === firmId || d?.firm === firmId || d?.form?.firmId === firmId
           );
-          if (filtered.length) return filtered.slice(0, desired).map(coerce).filter(Boolean) as HouseholdUI[];
+          if (filtered.length)
+            return filtered.slice(0, desired).map((raw) => ({
+              id: String(raw.householdId ?? raw.id ?? raw._id),
+              appId: String(raw._id ?? raw.appId ?? raw.applicationId),
+              property: formatProperty(raw.building ?? raw.property, raw.property),
+              unit: formatUnit(raw.unit),
+              submittedAt: toISO(raw.submittedAt ?? raw.createdAt ?? raw.updatedAt),
+              status: normalizeStatus(raw.status ?? raw.workflowStatus ?? raw.state ?? raw.phase),
+              members: synthesizeMembers(raw.members ?? raw.applicants ?? raw.people, raw.answersByMember),
+              nextStep: raw?.nextStep ?? null,
+              heldUntil: raw?.locks?.holding?.active && raw?.locks?.holding?.until ? toISO(raw.locks.holding.until) : null,
+            } as HouseholdUI));
         }
       }
-    } catch {
-      // next path
-    }
+    } catch {}
   }
   return null;
 }
@@ -366,28 +449,25 @@ export async function GET(req: NextRequest) {
   const user = await getSessionUser();
   if (!user) return NextResponse.json({ ok: false, error: "not_authenticated" }, { status: 401 });
 
-  // Basic paging & filters, unchanged
   const url = new URL(req.url);
   const limitParam = Number(url.searchParams.get("limit") || 50);
   const limit = Math.max(1, Math.min(200, Math.floor(limitParam)));
   const cursor = decodeCursor(url.searchParams.get("cursor"));
-  const statusParam = url.searchParams.get("status"); // optional
+  const statusParam = url.searchParams.get("status"); // optional exact match
   const q = (url.searchParams.get("q") || "").toLowerCase();
 
-  // Pull extra so in-memory filters still fill a page
   const desired = limit * 3;
 
   try {
     const { firmId, firmName, firmSlug } = await resolveFirmForUser(req, user);
 
-    // Prefer Mongo firm-scoped, then graceful fallbacks
     let rows: HouseholdUI[] =
       (await selectViaMongo(desired, firmId)) ??
       (await selectViaPrisma(desired, firmId)) ??
       (await selectViaCollections(desired, firmId)) ??
       [];
 
-    // Sort newest first, then property, unit, id (unchanged)
+    // Sort newest first, then property, unit, id
     rows.sort(
       (a, b) =>
         (b.submittedAt || "").localeCompare(a.submittedAt || "") ||
@@ -406,7 +486,7 @@ export async function GET(req: NextRequest) {
     }
 
     // Filters
-    if (statusParam) rows = rows.filter((r) => r.status === String(statusParam));
+    if (statusParam) rows = rows.filter((r) => String(r.status) === String(statusParam));
     if (q) {
       rows = rows.filter((h) =>
         [h.property, h.unit, h.status, ...h.members.map((m) => m.name), ...h.members.map((m) => m.email)]
@@ -423,7 +503,7 @@ export async function GET(req: NextRequest) {
       {
         ok: true,
         firm: { firmId, firmName, firmSlug },
-        households: page,        // each contains { id: householdId, appId, ... }
+        households: page,
         nextCursor,
       },
       { headers: { "cache-control": "no-store" } }

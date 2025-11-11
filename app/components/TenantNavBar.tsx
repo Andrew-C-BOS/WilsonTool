@@ -14,7 +14,7 @@ export default function TenantNavBar() {
     { href: "/tenant", label: "Home" },
 	{ href: "/tenant/household", label: "My Household" },
     { href: "/tenant/applications", label: "Applications" },
-    { href: "/tenant/payments", label: "Payments" },
+    { href: "/tenant/lease", label: "My Lease" },
     { href: "/tenant/documents", label: "Documents" },
     // { href: "/tenant/maintenance", label: "Maintenance" }, // add later if needed
   ];

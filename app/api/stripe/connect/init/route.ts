@@ -1,4 +1,3 @@
-// app/api/stripe/connect/init/route.ts
 import { NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
 import { getSessionUser } from "@/lib/auth";
@@ -8,13 +7,37 @@ import Stripe from "stripe";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function POST(_req: Request) {
+function getKind(req: Request): "operating" | "escrow" {
+  // For POST without explicit query, default to "operating" to stay BC
+  try {
+    const url = new URL((req as any).url ?? "");
+    const k = (url.searchParams.get("kind") || "operating").toLowerCase();
+    return k === "escrow" ? "escrow" : "operating";
+  } catch {
+    return "operating";
+  }
+}
+
+function businessProfileFor(kind: "operating" | "escrow") {
+  return kind === "escrow"
+    ? {
+        mcc: "6513",
+        product_description:
+          "Tenant security deposits held in a dedicated escrow account",
+      }
+    : {
+        mcc: "6513",
+        product_description:
+          "Residential property management payouts and ACH rent collection",
+      };
+}
+
+export async function POST(req: Request) {
   const user = await getSessionUser();
   if (!user) {
     return NextResponse.json({ ok: false, error: "not_authenticated" }, { status: 401 });
   }
 
-  // Find exactly one firm where user is owner/admin
   let firmCtx: { firmId: string; role: string };
   try {
     firmCtx = await resolveAdminFirmForUser(user);
@@ -26,6 +49,8 @@ export async function POST(_req: Request) {
     );
   }
 
+  const kind = getKind(req);
+
   const db = await getDb();
   const firms = db.collection("firms");
 
@@ -33,8 +58,6 @@ export async function POST(_req: Request) {
   if (!secret) {
     return NextResponse.json({ ok: false, error: "stripe_not_configured" }, { status: 500 });
   }
-
-  // Use your account's default Stripe API version (no apiVersion literal)
   const stripe = new Stripe(secret);
 
   // Support string or ObjectId for _id
@@ -44,26 +67,27 @@ export async function POST(_req: Request) {
     ? { _id: new ObjectId(firmIdStr) }
     : ({ _id: firmIdStr } as any);
 
-  // See if we already created an account for this firm
-  const existing = await firms.findOne(
-    firmIdFilter,
-    { projection: { stripeAccountId: 1, stripeStatus: 1 } }
-  );
+  // Does this firm already have the requested kind account?
+  const projection: any = {
+    [`stripe.${kind}AccountId`]: 1,
+    [`stripe.${kind}Status`]: 1,
+  };
+  const existing = await firms.findOne(firmIdFilter, { projection });
+  const existingAccountId = existing?.stripe?.[`${kind}AccountId` as const];
 
-  if (existing?.stripeAccountId) {
-    // Ensure capabilities we need are requested (idempotent)
-    const acct = await stripe.accounts.update(existing.stripeAccountId, {
+  if (existingAccountId) {
+    // Idempotently ensure capabilities are requested & profile set
+    const acct = await stripe.accounts.update(existingAccountId, {
       capabilities: {
         transfers: { requested: true },
+        // Collecting via ACH; add more (e.g., card_payments) if you accept cards.
         us_bank_account_ach_payments: { requested: true },
+        // card_payments: { requested: true },
       },
-      business_profile: {
-        mcc: "6513",
-        product_description: "Residential property management payouts and ACH rent collection",
-      },
+      business_profile: businessProfileFor(kind),
+      metadata: { firmId: String(firmCtx.firmId), accountKind: kind },
     });
 
-    // derive a simple local status
     const status =
       acct.charges_enabled && acct.payouts_enabled
         ? "active"
@@ -71,50 +95,58 @@ export async function POST(_req: Request) {
         ? "restricted"
         : "pending";
 
-    await firms.updateOne(firmIdFilter, {
-      $set: { stripeStatus: status, updatedAt: new Date() },
-    });
+    // IMPORTANT: do not touch the parent `stripe` key in the same update as dotted children
+    await firms.updateOne(
+      firmIdFilter,
+      {
+        $set: { [`stripe.${kind}Status`]: status, updatedAt: new Date() },
+      }
+    );
 
     return NextResponse.json({
       ok: true,
-      accountId: existing.stripeAccountId,
       firmId: firmCtx.firmId,
+      kind,
+      accountId: existingAccountId,
       stripeStatus: status,
     });
   }
 
-  // Create a NEW Express connected account with the right capabilities
+  // Create a NEW Express connected account for this kind
   const account = await stripe.accounts.create({
     type: "express",
     country: "US",
     capabilities: {
       transfers: { requested: true },
       us_bank_account_ach_payments: { requested: true },
+      // Add card_payments if you will accept card deposits/rent:
+      // card_payments: { requested: true },
     },
     business_type: "company",
-    business_profile: {
-      mcc: "6513",
-      product_description: "Residential property management payouts and ACH rent collection",
-    },
-    metadata: { firmId: firmCtx.firmId },
+    business_profile: businessProfileFor(kind),
+    metadata: { firmId: String(firmCtx.firmId), accountKind: kind },
   });
 
+  // Upsert only dotted fields; do NOT set the parent `stripe` in the same update
   await firms.updateOne(
     firmIdFilter,
     {
       $set: {
-        stripeAccountId: account.id,
-        stripeStatus: "pending", // will flip via webhook after onboarding
+        [`stripe.${kind}AccountId`]: account.id,
+        [`stripe.${kind}Status`]: "pending",
         updatedAt: new Date(),
       },
+      // Safe to stamp createdAt on first insert without touching `stripe`
+      $setOnInsert: { createdAt: new Date() },
     },
     { upsert: true }
   );
 
   return NextResponse.json({
     ok: true,
-    accountId: account.id,
     firmId: firmCtx.firmId,
+    kind,
+    accountId: account.id,
     stripeStatus: "pending",
   });
 }

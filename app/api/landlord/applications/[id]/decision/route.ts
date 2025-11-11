@@ -56,10 +56,15 @@ function isHex24(s: string) {
   return /^[0-9a-fA-F]{24}$/.test(s);
 }
 
-async function getParamsId(req: NextRequest, ctx: { params?: any }) {
+
+async function getParamsId(
+  req: NextRequest,
+  ctx: { params?: { id: string } | Promise<{ id: string }> }
+) {
   try {
-    const id = ctx?.params?.id ?? (await (ctx as any).params)?.id;
-    if (id) return String(id);
+    const p = await (ctx as any)?.params;            // always await (handles both shapes)
+    const raw = Array.isArray(p?.id) ? p.id[0] : p?.id;
+    if (raw) return String(raw);
   } catch {}
   const seg = (req.nextUrl?.pathname || "").split("/").filter(Boolean).pop();
   return seg || "";

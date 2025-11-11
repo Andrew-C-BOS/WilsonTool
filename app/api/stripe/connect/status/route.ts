@@ -1,4 +1,3 @@
-// app/api/stripe/connect/status/route.ts
 import { NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
 import { getSessionUser } from "@/lib/auth";
@@ -8,7 +7,27 @@ import Stripe from "stripe";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function GET(_req: Request) {
+function getKind(req: Request): "operating" | "escrow" {
+  const url = new URL(req.url);
+  const k = (url.searchParams.get("kind") || "operating").toLowerCase();
+  return k === "escrow" ? "escrow" : "operating";
+}
+
+function stripeFieldFor(kind: "operating" | "escrow") {
+  // Dotted keys only (avoid parent/child conflicts when updating)
+  return {
+    accountIdKey: `stripe.${kind}AccountId`,
+    dashboardUrlKey: `stripe.${kind}DashboardUrl`,
+    dashboardAtKey: `stripe.${kind}DashboardAt`,
+    projection: {
+      [`stripe.${kind}AccountId`]: 1 as const,
+      [`stripe.${kind}DashboardUrl`]: 1 as const,
+      [`stripe.${kind}DashboardAt`]: 1 as const,
+    } as any,
+  };
+}
+
+export async function GET(req: Request) {
   const user = await getSessionUser();
   if (!user) return NextResponse.json({ ok: false, error: "not_authenticated" }, { status: 401 });
 
@@ -23,6 +42,9 @@ export async function GET(_req: Request) {
     );
   }
 
+  const kind = getKind(req);
+  const { accountIdKey, dashboardUrlKey, dashboardAtKey, projection } = stripeFieldFor(kind);
+
   const db = await getDb();
   const firms = db.collection("firms");
 
@@ -33,16 +55,16 @@ export async function GET(_req: Request) {
     ? { _id: new ObjectId(firmIdStr) }
     : ({ _id: firmIdStr } as any);
 
-  // If the firm doc doesn't exist yet, just return “empty” status (no Stripe account)
-  const firm = await firms.findOne(
-    firmIdFilter,
-    { projection: { stripeAccountId: 1, stripeDashboardUrl: 1 } }
-  );
+  // Load only what we need
+  const firm = await firms.findOne(firmIdFilter, { projection });
 
-  if (!firm?.stripeAccountId) {
+  const accountId = firm?.stripe?.[`${kind}AccountId` as const] || null;
+
+  if (!accountId) {
     return NextResponse.json({
       ok: true,
       firmId: firmCtx.firmId,
+      kind,
       accountId: null,
       detailsSubmitted: false,
       payoutsEnabled: false,
@@ -55,18 +77,39 @@ export async function GET(_req: Request) {
   if (!stripeSecret) {
     return NextResponse.json({ ok: false, error: "stripe_not_configured" }, { status: 500 });
   }
-  // Use account default API version
   const stripe = new Stripe(stripeSecret);
 
-  const acct = await stripe.accounts.retrieve(firm.stripeAccountId);
+  // Live account status
+  const acct = await stripe.accounts.retrieve(accountId);
+
+  // Always create a fresh Express login link (valid ~24h)
+  let dashboardUrl: string | null = null;
+  try {
+    const login = await stripe.accounts.createLoginLink(accountId);
+    dashboardUrl = login?.url || null;
+
+    if (dashboardUrl) {
+      // Cache it (optional), using only dotted keys (no parent collisions)
+      await firms.updateOne(firmIdFilter, {
+        $set: {
+          [dashboardUrlKey]: dashboardUrl,
+          [dashboardAtKey]: new Date(),
+          updatedAt: new Date(),
+        },
+      });
+    }
+  } catch {
+    // Non-fatal: if creation fails, keep dashboardUrl as null
+  }
 
   return NextResponse.json({
     ok: true,
     firmId: firmCtx.firmId,
+    kind,
     accountId: acct.id,
     detailsSubmitted: !!acct.details_submitted,
     payoutsEnabled: !!acct.payouts_enabled,
     chargesEnabled: !!acct.charges_enabled,
-    dashboardUrl: firm?.stripeDashboardUrl || null,
+    dashboardUrl, // freshly generated (or null if creation failed)
   });
 }
