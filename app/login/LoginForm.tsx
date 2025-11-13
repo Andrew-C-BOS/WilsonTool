@@ -6,7 +6,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 export default function LoginForm() {
   const router = useRouter();
   const sp = useSearchParams();
-  const next = sp.get("next") || "/landlord";
+  const next = sp.get("next") || "/";
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");

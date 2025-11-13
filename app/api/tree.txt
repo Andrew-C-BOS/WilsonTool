@@ -1,0 +1,229 @@
+Folder PATH listing
+Volume serial number is DE70-3CB5
+C:.
+|   tree.txt
+|   
++---admin
+|   +---firm-memberships
+|   |       route.ts
+|   |       
+|   +---firms
+|   |   |   route.ts
+|   |   |   
+|   |   \---[id]
+|   |           route.ts
+|   |           
+|   \---init
+|           route.ts
+|           
++---auth
+|   +---login
+|   |       route.ts
+|   |       
+|   +---logout
+|   |       route.ts
+|   |       
+|   +---me
+|   |       route.ts
+|   |       
+|   \---register
+|           route.ts
+|           
++---forms
+|   |   route.ts
+|   |   
+|   \---[id]
+|           route.ts
+|           
++---health
+|       route.ts
+|       
++---holding
+|   \---[token]
+|       |   route.ts
+|       |   
+|       \---intent
+|               route.ts
+|               
++---join
+|   +---complete
+|   |       route.ts
+|   |       
+|   +---lookup
+|   |       route.ts
+|   |       
+|   \---start
+|           route.ts
+|           
++---landlord
+|   +---applications
+|   |   |   route.ts
+|   |   |   
+|   |   \---[id]
+|   |       |   route.ts
+|   |       |   
+|   |       +---decision
+|   |       |       route.ts
+|   |       |       
+|   |       +---holding
+|   |       |       route.ts
+|   |       |       
+|   |       +---lease
+|   |       |   \---setup
+|   |       |           route.ts
+|   |       |           
+|   |       +---payment-tasks
+|   |       |       route.ts
+|   |       |       
+|   |       \---plan
+|   |               route.ts
+|   |               
+|   +---chat
+|   |   +---open
+|   |   |       route.ts
+|   |   |       
+|   |   \---[id]
+|   |           route.ts
+|   |           
+|   +---escrow-disclosure
+|   |       route.ts
+|   |       
+|   +---firm
+|   |   \---role
+|   |           route.ts
+|   |           
+|   \---leases
+|       +---by-app
+|       |   +---create
+|       |   |       route.ts
+|       |   |       
+|       |   \---[appId]
+|       |       |   route.ts
+|       |       |   
+|       |       \---assign
+|       |               route.ts
+|       |               
+|       +---list
+|       |       route.ts
+|       |       
+|       \---[id]
+|           |   route.ts
+|           |   
+|           +---overview
+|           |       route.ts
+|           |       
+|           \---unit
+|                   route.ts
+|                   
++---receipts
+|   \---security-deposit
+|       \---[paymentId]
+|               route.ts
+|               
++---stripe
+|   +---connect
+|   |   |   _shared.ts
+|   |   |   
+|   |   +---init
+|   |   |       route.ts
+|   |   |       
+|   |   +---link
+|   |   |       route.ts
+|   |   |       
+|   |   \---status
+|   |           route.ts
+|   |           
+|   \---webhook
+|           route.ts
+|           
+\---tenant
+    +---allocations
+    |   +---resolve
+    |   |       route.ts
+    |   |       
+    |   \---summary
+    |           route.ts
+    |           
+    +---applications
+    |   |   route.ts
+    |   |   
+    |   +---open
+    |   |       route.ts
+    |   |       
+    |   +---search
+    |   |       route.ts
+    |   |       
+    |   \---[id]
+    |       |   route.ts
+    |       |   
+    |       \---invite
+    |               route.ts
+    |               
+    +---charges
+    |       route.ts
+    |       
+    +---chat
+    |   +---open
+    |   |       route.ts
+    |   |       
+    |   \---[id]
+    |           route.ts
+    |           
+    +---deposit
+    |   \---disclosure
+    |           route.ts
+    |           
+    +---hold
+    |   \---link
+    |           route.ts
+    |           
+    +---household
+    |   +---cluster
+    |   |       route.ts
+    |   |       
+    |   +---invites
+    |   |   |   route.ts
+    |   |   |   
+    |   |   +---redeem
+    |   |   |       route.ts
+    |   |   |       
+    |   |   \---[id]
+    |   |           route.ts
+    |   |           
+    |   +---leave
+    |   |       route.ts
+    |   |       
+    |   \---rename
+    |           route.ts
+    |           
+    +---inspection
+    |   |   route.ts
+    |   |   
+    |   +---img
+    |   |       route.ts
+    |   |       
+    |   \---upload-init
+    |           route.ts
+    |           
+    +---lease
+    |   |   route.ts
+    |   |   
+    |   \---checklist
+    |           route.ts
+    |           
+    +---payments
+    |   +---list
+    |   |       route.ts
+    |   |       
+    |   +---result
+    |   |       route.ts
+    |   |       
+    |   +---session
+    |   |       route.ts
+    |   |       
+    |   \---summary
+    |           route.ts
+    |           
+    \---profile
+            route.ts
+            

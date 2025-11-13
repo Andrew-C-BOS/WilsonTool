@@ -6,6 +6,17 @@ import type { SESv2Client } from "@aws-sdk/client-sesv2";
 /* ─────────────────────────────────────────────────────────────
    Types
 ───────────────────────────────────────────────────────────── */
+export type MailAttachment = {
+  filename: string;
+  contentType: string;
+  /**
+   * Base64-encoded body of the file.
+   * (We can also support Buffer/Uint8Array, but base64 string is simplest.)
+   */
+  contentBase64: string;
+};
+
+
 export type MailInput = {
   to: string;
   subject: string;
@@ -15,6 +26,7 @@ export type MailInput = {
   headers?: Record<string, string>;
   idempotencyKey?: string;
   traceId?: string; // for correlating logs
+  attachments?: MailAttachment[];
 };
 
 export interface Mailer {
@@ -25,7 +37,7 @@ export interface Mailer {
    Env + debug
 ───────────────────────────────────────────────────────────── */
 const MAIL_PROVIDER = (process.env.MAIL_PROVIDER || "console").toLowerCase();
-const MAIL_FROM = process.env.MAIL_FROM || "MILO <no-reply@milohomes.co>";
+const MAIL_FROM = process.env.MAIL_FROM || "MILO <no-reply@milohomesbos.com>";
 const AWS_SES_CONFIGURATION_SET = process.env.AWS_SES_CONFIGURATION_SET || "";
 const MAIL_DEBUG = process.env.MAIL_DEBUG === "1";
 
@@ -76,6 +88,74 @@ export function renderOtpEmail(opts: {
 
 function escapeHtml(s: string) {
   return s.replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]!));
+}
+
+function rand(n = 16): string {
+  return Array.from({ length: n }, () =>
+    Math.floor(Math.random() * 36).toString(36)
+  ).join("");
+}
+
+function buildMimeWithAttachments(input: {
+  from: string;
+  to: string;
+  subject: string;
+  text?: string;
+  html?: string;
+  attachments: MailAttachment[];
+}): string {
+  const boundaryMixed = "mixed_" + rand(16);
+  const boundaryAlt = "alt_" + rand(16);
+
+  const textPart = input.text || "";
+  const htmlPart =
+    input.html ||
+    `<html><body><pre style="font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial;">${textPart}</pre></body></html>`;
+
+  let mime = "";
+
+  mime += `From: ${input.from}\r\n`;
+  mime += `To: ${input.to}\r\n`;
+  mime += `Subject: ${input.subject}\r\n`;
+  mime += `MIME-Version: 1.0\r\n`;
+  mime += `Content-Type: multipart/mixed; boundary="${boundaryMixed}"\r\n`;
+  mime += `\r\n`;
+  mime += `--${boundaryMixed}\r\n`;
+  mime += `Content-Type: multipart/alternative; boundary="${boundaryAlt}"\r\n`;
+  mime += `\r\n`;
+
+  // Text part
+  mime += `--${boundaryAlt}\r\n`;
+  mime += `Content-Type: text/plain; charset="UTF-8"\r\n`;
+  mime += `Content-Transfer-Encoding: 7bit\r\n`;
+  mime += `\r\n`;
+  mime += `${textPart}\r\n`;
+  mime += `\r\n`;
+
+  // HTML part
+  mime += `--${boundaryAlt}\r\n`;
+  mime += `Content-Type: text/html; charset="UTF-8"\r\n`;
+  mime += `Content-Transfer-Encoding: 7bit\r\n`;
+  mime += `\r\n`;
+  mime += `${htmlPart}\r\n`;
+  mime += `\r\n`;
+
+  mime += `--${boundaryAlt}--\r\n`;
+
+  // Attachments
+  for (const att of input.attachments) {
+    mime += `--${boundaryMixed}\r\n`;
+    mime += `Content-Type: ${att.contentType}; name="${att.filename}"\r\n`;
+    mime += `Content-Transfer-Encoding: base64\r\n`;
+    mime += `Content-Disposition: attachment; filename="${att.filename}"\r\n`;
+    mime += `\r\n`;
+    mime += `${att.contentBase64}\r\n`;
+    mime += `\r\n`;
+  }
+
+  mime += `--${boundaryMixed}--\r\n`;
+
+  return mime;
 }
 
 /* ─────────────────────────────────────────────────────────────
@@ -195,16 +275,62 @@ class SESMailer implements Mailer {
           : []),
       ] as Array<{ Name: string; Value: string }>;
 
-    const cmd = new SendEmailCommand({
+    // If no attachments, use existing Simple flow (no behavior change)
+    const hasAttachments = Array.isArray(input.attachments) && input.attachments.length > 0;
+    if (!hasAttachments) {
+      const cmd = new SendEmailCommand({
+        FromEmailAddress: from,
+        Destination: { ToAddresses: [input.to] },
+        Content: {
+          Simple: {
+            Subject: { Data: input.subject, Charset: "UTF-8" },
+            Body: {
+              Html: input.html ? { Data: input.html, Charset: "UTF-8" } : undefined,
+              Text: input.text ? { Data: input.text, Charset: "UTF-8" } : undefined,
+            },
+          },
+        },
+        ConfigurationSetName: AWS_SES_CONFIGURATION_SET || undefined,
+        EmailTags,
+      });
+
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const out = await client.send(cmd);
+          dbg("SES sent", { requestId: out?.$metadata?.requestId, traceId: input.traceId });
+          return { ok: true as const };
+        } catch (e: any) {
+          const status = String(e?.$metadata?.httpStatusCode || "");
+          const name = String(e?.name || "ses_error");
+          const message = String(e?.message || "");
+          dbg("SES error", { status, name, message, attempt, traceId: input.traceId });
+
+          if (status === "429" || status.startsWith("5")) {
+            await wait(msBackoff(attempt));
+            continue;
+          }
+          return { ok: false as const, error: `ses_${status || name}:${message}` };
+        }
+      }
+      return { ok: false as const, error: "ses_retry_exhausted" };
+    }
+
+    // Attachments present → build raw MIME and send as Raw content
+    const rawMime = buildMimeWithAttachments({
+      from,
+      to: input.to,
+      subject: input.subject,
+      text: input.text,
+      html: input.html,
+      attachments: input.attachments!,
+    });
+
+    const rawCmd = new SendEmailCommand({
       FromEmailAddress: from,
       Destination: { ToAddresses: [input.to] },
       Content: {
-        Simple: {
-          Subject: { Data: input.subject, Charset: "UTF-8" },
-          Body: {
-            Html: input.html ? { Data: input.html, Charset: "UTF-8" } : undefined,
-            Text: input.text ? { Data: input.text, Charset: "UTF-8" } : undefined,
-          },
+        Raw: {
+          Data: Buffer.from(rawMime, "utf-8"),
         },
       },
       ConfigurationSetName: AWS_SES_CONFIGURATION_SET || undefined,
@@ -213,14 +339,14 @@ class SESMailer implements Mailer {
 
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const out = await client.send(cmd);
-        dbg("SES sent", { requestId: out?.$metadata?.requestId, traceId: input.traceId });
+        const out = await client.send(rawCmd);
+        dbg("SES sent (raw)", { requestId: out?.$metadata?.requestId, traceId: input.traceId });
         return { ok: true as const };
       } catch (e: any) {
         const status = String(e?.$metadata?.httpStatusCode || "");
         const name = String(e?.name || "ses_error");
         const message = String(e?.message || "");
-        dbg("SES error", { status, name, message, attempt, traceId: input.traceId });
+        dbg("SES raw error", { status, name, message, attempt, traceId: input.traceId });
 
         if (status === "429" || status.startsWith("5")) {
           await wait(msBackoff(attempt));
@@ -229,7 +355,8 @@ class SESMailer implements Mailer {
         return { ok: false as const, error: `ses_${status || name}:${message}` };
       }
     }
-    return { ok: false as const, error: "ses_retry_exhausted" };
+
+    return { ok: false as const, error: "ses_raw_retry_exhausted" };
   }
 }
 

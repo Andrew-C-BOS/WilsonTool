@@ -2,6 +2,7 @@
 "use client";
 
 import * as React from "react";
+import { useRouter } from "next/navigation";
 
 /* ---------------- Types ---------------- */
 type Firm = {
@@ -29,7 +30,9 @@ type Member = {
 };
 
 /* ---------------- Small UI helpers ---------------- */
-function SectionCard(props: React.PropsWithChildren<{ title: string; subtitle?: string; right?: React.ReactNode }>) {
+function SectionCard(
+  props: React.PropsWithChildren<{ title: string; subtitle?: string; right?: React.ReactNode }>
+) {
   return (
     <section className="rounded-xl border border-zinc-800/60 bg-zinc-900/40 p-5 md:p-6">
       <div className="mb-4 flex items-start justify-between gap-2">
@@ -48,8 +51,6 @@ function Label({ children }: { children: React.ReactNode }) {
   return <div className="mb-1 text-xs font-semibold tracking-wide text-zinc-200">{children}</div>;
 }
 
-
-
 function Input(props: React.InputHTMLAttributes<HTMLInputElement>) {
   return (
     <input
@@ -62,7 +63,6 @@ function Input(props: React.InputHTMLAttributes<HTMLInputElement>) {
     />
   );
 }
-
 
 function Select(props: React.SelectHTMLAttributes<HTMLSelectElement>) {
   return (
@@ -85,20 +85,15 @@ function Button({
   const base =
     "inline-flex items-center justify-center rounded-lg px-3.5 py-2 text-sm font-semibold tracking-wide " +
     "focus:outline-none transition ring-1";
-
   const styles =
     tone === "primary"
       ? "bg-pink-500 !text-white ring-pink-300/70 hover:bg-pink-400 active:bg-pink-300"
       : tone === "danger"
       ? "bg-red-500 !text-white ring-red-300/70 hover:bg-red-400 active:bg-red-300"
       : "bg-zinc-800/80 !text-white ring-zinc-600/70 hover:bg-zinc-700 active:bg-zinc-600";
-
-  const disabled =
-    "disabled:opacity-70 disabled:saturate-75 disabled:cursor-not-allowed";
-
+  const disabled = "disabled:opacity-70 disabled:saturate-75 disabled:cursor-not-allowed";
   return (
     <button {...rest} className={`${base} ${styles} ${disabled} ${rest.className ?? ""}`}>
-      {/* force children to use the parent color */}
       <span className="leading-none text-current">{children}</span>
     </button>
   );
@@ -110,6 +105,8 @@ function Badge({ children }: { children: React.ReactNode }) {
 
 /* ---------------- Component ---------------- */
 export default function AdminPanel() {
+  const router = useRouter();
+
   const [firms, setFirms] = React.useState<Firm[]>([]);
   const [loading, setLoading] = React.useState(false);
   const [message, setMessage] = React.useState<string | null>(null);
@@ -142,6 +139,19 @@ export default function AdminPanel() {
     refreshFirms();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /* -------------- Auth -------------- */
+  async function handleLogout() {
+    try {
+      const res = await fetch("/api/auth/logout", { method: "POST" });
+      if (!res.ok) throw new Error("Failed to log out");
+      router.replace("/login"); // or "/"
+      router.refresh();
+    } catch (e) {
+      console.error(e);
+      toast("Logout failed", "err");
+    }
+  }
 
   /* -------------- Server calls -------------- */
   async function refreshFirms() {
@@ -178,7 +188,6 @@ export default function AdminPanel() {
   function toast(msg: string, tone: "ok" | "err" = "ok") {
     setMsgTone(tone);
     setMessage(msg);
-    // auto-hide
     setTimeout(() => setMessage(null), 3500);
   }
 
@@ -236,7 +245,6 @@ export default function AdminPanel() {
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || "Failed to delete firm");
       toast("Firm deleted", "ok");
-      // if we deleted the selected firm, clear members list
       if (assignForm.firmId === id) {
         setMembers([]);
         setAssignForm((s) => ({ ...s, firmId: "" }));
@@ -299,10 +307,18 @@ export default function AdminPanel() {
   /* -------------- UI -------------- */
   return (
     <div className="mx-auto max-w-5xl px-4 py-8 md:py-10">
-      <h1 className="mb-1 text-xl md:text-2xl font-semibold text-zinc-100">Admin</h1>
-      <p className="mb-6 text-sm text-zinc-400">
-        Create and destroy firms, assign users to firms, all in one place.
-      </p>
+      {/* Header + Logout */}
+      <div className="mb-6 flex items-start justify-between gap-3">
+        <div>
+          <h1 className="text-xl md:text-2xl font-semibold text-zinc-100">Admin</h1>
+          <p className="mt-1 text-sm text-zinc-400">
+            Create and destroy firms, assign users to firms, all in one place.
+          </p>
+        </div>
+        <Button tone="ghost" onClick={handleLogout}>
+          Log out
+        </Button>
+      </div>
 
       {message && (
         <div
@@ -330,7 +346,6 @@ export default function AdminPanel() {
                   setCreateForm((s) => ({
                     ...s,
                     name: e.target.value,
-                    // auto-suggest slug when empty
                     slug: s.slug ? s.slug : slugify(e.target.value),
                   }))
                 }
@@ -359,7 +374,10 @@ export default function AdminPanel() {
             </div>
             <div className="md:col-span-2">
               <Label>Address line 1</Label>
-              <Input value={createForm.addressLine1} onChange={(e) => setCreateForm((s) => ({ ...s, addressLine1: e.target.value }))} />
+              <Input
+                value={createForm.addressLine1}
+                onChange={(e) => setCreateForm((s) => ({ ...s, addressLine1: e.target.value }))}
+              />
             </div>
             <div>
               <Label>City</Label>
@@ -406,7 +424,10 @@ export default function AdminPanel() {
                     <span className="text-zinc-400">({f.slug})</span>
                     {f.website ? (
                       <span className="text-zinc-400">
-                        , <a className="underline hover:text-zinc-200" href={f.website} target="_blank" rel="noreferrer">{f.website}</a>
+                        ,{" "}
+                        <a className="underline hover:text-zinc-200" href={f.website} target="_blank" rel="noreferrer">
+                          {f.website}
+                        </a>
                       </span>
                     ) : null}
                   </div>
@@ -439,10 +460,7 @@ export default function AdminPanel() {
           <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
             <div>
               <Label>Firm</Label>
-              <Select
-                value={assignForm.firmId}
-                onChange={(e) => setAssignForm((s) => ({ ...s, firmId: e.target.value }))}
-              >
+              <Select value={assignForm.firmId} onChange={(e) => setAssignForm((s) => ({ ...s, firmId: e.target.value }))}>
                 {firms.map((f) => (
                   <option key={f._id} value={f._id}>
                     {f.name}
@@ -499,8 +517,7 @@ export default function AdminPanel() {
                 <li key={m._id} className="flex flex-col gap-2 p-3 md:flex-row md:items-center md:justify-between">
                   <div className="min-w-0">
                     <div className="truncate text-zinc-100">
-                      <span className="font-medium">{m.userEmail ?? m.userId}</span>{" "}
-                      <Badge>{m.role}</Badge>
+                      <span className="font-medium">{m.userEmail ?? m.userId}</span> <Badge>{m.role}</Badge>
                       {m.title ? <span className="text-zinc-400">, {m.title}</span> : null}
                     </div>
                     {m.department ? <div className="truncate text-xs text-zinc-500">{m.department}</div> : null}

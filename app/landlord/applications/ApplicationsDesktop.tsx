@@ -6,119 +6,126 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 /* ------------------------------------------
-   Types used by this UI
+   New canonical statuses (steps)
 ------------------------------------------- */
 type AppStatus =
-  | "new"
-  | "in_review"
-  | "needs_approval"
-  | "approved_pending_payment"
-  | "approved_pending_funds"
-  | "accepted_held"
-  | "approved_ready_to_lease"
-  | "approved_pending_lease"
-  | "countersign_ready"        // ← NEW
+  | "draft"
+  | "submitted"
+  | "admin_screened"
+  | "approved_high"
+  | "terms_set"
+  | "min_due"
+  | "min_paid"
+  | "countersigned"
+  | "occupied"
   | "rejected"
-  | string;
+  | "withdrawn";
 
 type MemberRole = "primary" | "co-applicant" | "cosigner";
 
 type Household = {
-  id: string;          // householdId
-  appId: string;       // applicationId (for Review & Chat)
+  id: string;
+  appId: string;
   submittedAt: string;
   status: AppStatus;
-  members: {
-    name: string;
-    email: string;
-    role: MemberRole;
-    state?: "invited" | "complete" | "missing_docs";
-  }[];
+  members: { name: string; email: string; role: MemberRole }[];
 };
 
 type FirmMeta = { firmId: string; firmName: string; firmSlug?: string } | null;
 
 /* ------------------------------------------
-   Visual primitives
+   Utils
 ------------------------------------------- */
-function clsx(...parts: (string | false | null | undefined)[]) {
-  return parts.filter(Boolean).join(" ");
+function clsx(...xs: (string | false | null | undefined)[]) {
+  return xs.filter(Boolean).join(" ");
 }
-function formatDate(s: string): string {
+function formatDate(s: string) {
   if (!s) return "—";
   const d = new Date(s);
   return isNaN(d.getTime()) ? s : d.toLocaleDateString();
 }
-
-/* ------------------------------------------
-   Funnel steps (labels only; status strings unchanged)
-------------------------------------------- */
-// Include an explicit Countersign step
-const STEPS: { key: AppStatus; label: string }[] = [
-  { key: "new",                      label: "New" },
-  { key: "in_review",                label: "Review" },
-  { key: "needs_approval",           label: "Decision" },
-  { key: "approved_pending_payment", label: "Payment" },
-  { key: "approved_pending_funds",   label: "Funds Processing" },
-  { key: "accepted_held",            label: "Held" },
-  { key: "approved_ready_to_lease",  label: "Ready to Lease" },
-  { key: "approved_pending_lease",   label: "Pending Lease" },
-  { key: "countersign_ready",        label: "Countersign" }, // ← NEW
-];
-// Some apps may be “rejected” (terminal)
-const TERMINAL_REJECTED = "rejected";
-
-/* Small stepper */
-function Stepper({ status }: { status: AppStatus }) {
-  const idx = STEPS.findIndex(s => s.key === status);
-  const rejected = status === TERMINAL_REJECTED;
-
-  return (
-    <div className="flex items-center gap-2">
-      {rejected ? (
-        <span className="rounded-full bg-rose-50 text-rose-700 ring-1 ring-rose-200 px-2.5 py-0.5 text-[11px] font-medium">
-          Rejected
-        </span>
-      ) : (
-        <div className="flex items-center gap-2">
-          {STEPS.map((s, i) => {
-            const done   = idx > i && idx !== -1;
-            const active = idx === i;
-            return (
-              <div key={s.key} className="flex items-center gap-2">
-                <span
-                  className={clsx(
-                    "inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-medium ring-1 ring-inset",
-                    done   && "bg-emerald-50 text-emerald-800 ring-emerald-200",
-                    active && "bg-violet-50  text-violet-800  ring-violet-200",
-                    !done && !active && "bg-gray-100 text-gray-700 ring-gray-200"
-                  )}
-                  title={s.key}
-                >
-                  {s.label}
-                </span>
-                {i < STEPS.length - 1 && <span className="h-px w-4 bg-gray-200" />}
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
+function toISO(x: any): string {
+  if (!x) return "";
+  const d = new Date(x);
+  return isNaN(d.getTime()) ? String(x) : d.toISOString();
+}
+const val = (s: unknown): string | undefined => {
+  const t = typeof s === "string" ? s : s == null ? undefined : String(s);
+  return t && t.trim() ? t : undefined;
+};
+function getId(raw: any): string | null {
+  const c = raw?.id ?? raw?.hhId ?? raw?.householdId ?? raw?._id ?? null;
+  if (!c) return null;
+  if (typeof c === "object" && c.$oid) return String(c.$oid);
+  if (typeof c === "object" && typeof c.toString === "function") {
+    const s = c.toString();
+    if (s && s !== "[object Object]") return s;
+  }
+  return String(c);
+}
+function getAppId(raw: any): string | null {
+  const c = raw?.appId ?? raw?.applicationId ?? raw?.application_id ?? raw?._id ?? null;
+  if (!c) return null;
+  if (typeof c === "object" && c.$oid) return String(c.$oid);
+  if (typeof c === "object" && typeof c.toString === "function") {
+    const s = c.toString();
+    if (s && s !== "[object Object]") return s;
+  }
+  return String(c);
 }
 
-/* Suggested next action text */
-function nextActionCopy(status: AppStatus): string {
-  if (status === "new" || status === "in_review") return "Open review to screen this application.";
-  if (status === "needs_approval") return "Make a decision, then choose the next step.";
-  if (status === "approved_pending_payment") return "Send the tenant the holding link to collect funds.";
-  if (status === "approved_pending_funds") return "Funds are processing; prepare lease details.";
-  if (status === "accepted_held") return "Holding paid — unit reserved. Proceed to lease setup.";
-  if (status === "approved_ready_to_lease") return "Ready to lease — prepare and send the lease.";
-  if (status === "approved_pending_lease") return "Funds closed — finalize countersignature.";
-  if (status === "countersign_ready") return "Tenant funds received. Create and send the lease for countersignature."; // ← NEW
-  if (status === "rejected") return "Application closed.";
-  return "Continue with the next step.";
+/* ------------------------------------------
+   Stage model (one group per step)
+------------------------------------------- */
+type StageKey =
+  | "draft"
+  | "submitted"
+  | "admin_screened"
+  | "approved_high"
+  | "terms_set"
+  | "min_due"
+  | "min_paid"
+  | "countersigned"
+  | "occupied"
+  | "closed";
+
+const STAGE_ORDER: { key: StageKey; label: string; match: (s: AppStatus) => boolean }[] = [
+  { key: "draft",          label: "Draft",         match: (s) => s === "draft" },
+  { key: "submitted",      label: "Submitted",     match: (s) => s === "submitted" },
+  { key: "admin_screened", label: "In Review",     match: (s) => s === "admin_screened" },
+  { key: "approved_high",  label: "Approved",      match: (s) => s === "approved_high" },
+  { key: "terms_set",      label: "Terms Set",     match: (s) => s === "terms_set" },
+  { key: "min_due",        label: "Payment Due",   match: (s) => s === "min_due" },
+  { key: "min_paid",       label: "Ready to Sign", match: (s) => s === "min_paid" },
+  { key: "countersigned",  label: "Countersigned", match: (s) => s === "countersigned" },
+  { key: "occupied",       label: "Occupied",      match: (s) => s === "occupied" },
+  { key: "closed",         label: "Closed",        match: (s) => s === "rejected" || s === "withdrawn" },
+];
+
+function labelForStatus(s: AppStatus): string {
+  const hit = STAGE_ORDER.find((stage) => stage.match(s));
+  if (hit) return hit.label;
+  // sensible fallback, capitalized
+  return s.replace("_", " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/* ------------------------------------------
+   Color system per status (outline + light shade)
+------------------------------------------- */
+function colorClassesForStatus(s: AppStatus) {
+  // map to tailwind colors used in badges
+  if (s === "draft")             return { border: "border-gray-300",    bg: "bg-gray-50" };
+  if (s === "submitted")         return { border: "border-blue-300",    bg: "bg-blue-50" };
+  if (s === "admin_screened")    return { border: "border-amber-300",   bg: "bg-amber-50" };
+  if (s === "approved_high")     return { border: "border-violet-300",  bg: "bg-violet-50" };
+  if (s === "terms_set")         return { border: "border-violet-300",  bg: "bg-violet-50" };
+  if (s === "min_due")           return { border: "border-violet-300",  bg: "bg-violet-50" };
+  if (s === "min_paid")          return { border: "border-emerald-300", bg: "bg-emerald-50" };
+  if (s === "countersigned")     return { border: "border-emerald-300", bg: "bg-emerald-50" };
+  if (s === "occupied")          return { border: "border-emerald-300", bg: "bg-emerald-50" };
+  if (s === "rejected" || s === "withdrawn")
+                                 return { border: "border-rose-300",    bg: "bg-rose-50" };
+  return { border: "border-gray-200", bg: "bg-white" };
 }
 
 /* ------------------------------------------
@@ -132,55 +139,25 @@ const ENDPOINT = (cursor?: string, firmId?: string) => {
   return `/api/landlord/applications?${qp.toString()}`;
 };
 
-function getId(raw: any): string | null {
-  const candidate = raw?.id ?? raw?.hhId ?? raw?.householdId ?? raw?._id ?? null;
-  if (!candidate) return null;
-  if (typeof candidate === "object" && candidate.$oid) return String(candidate.$oid);
-  if (typeof candidate === "object" && typeof candidate.toString === "function") {
-    const s = candidate.toString();
-    if (s && s !== "[object Object]") return s;
-  }
-  return String(candidate);
-}
-function getAppId(raw: any): string | null {
-  const candidate = raw?.appId ?? raw?.applicationId ?? raw?.application_id ?? raw?._id ?? null;
-  if (!candidate) return null;
-  if (typeof candidate === "object" && candidate.$oid) return String(candidate.$oid);
-  if (typeof candidate === "object" && typeof candidate.toString === "function") {
-    const s = candidate.toString();
-    if (s && s !== "[object Object]") return s;
-  }
-  return String(candidate);
-}
-function toISO(x: any): string {
-  if (!x) return "";
-  const d = new Date(x);
-  return isNaN(d.getTime()) ? String(x) : d.toISOString();
-}
-const val = (s: unknown): string | undefined => {
-  const t = typeof s === "string" ? s : s == null ? undefined : String(s);
-  return t && t.trim() ? t : undefined;
-};
-
 function coerceToHouseholdUI(raw: any): Household | null {
   const id = getId(raw);
   const appId = getAppId(raw);
   if (!id || !appId) return null;
-
   const submittedAt = toISO(raw.submittedAt ?? raw.createdAt ?? raw.updatedAt);
-  const status = String(raw.status ?? "in_review") as AppStatus;
+  const status = String(raw.status ?? "submitted") as AppStatus;
   const membersRaw: any[] = Array.isArray(raw.members) ? raw.members : [];
-  const members = membersRaw.map((m) => {
-    const name =
+  const members = membersRaw.map((m) => ({
+    name:
       val(m.name) ??
       val(m.fullName) ??
-      (val(m.firstName) && val(m.lastName) ? `${val(m.firstName)} ${val(m.lastName)}` : undefined) ??
+      (val(m.firstName) && val(m.lastName)
+        ? `${val(m.firstName)} ${val(m.lastName)}`
+        : undefined) ??
       val(m.email) ??
-      "—";
-    const email = val(m.email) ?? val(m.mail) ?? "—";
-    return { name, email, role: "co-applicant" as MemberRole };
-  });
-
+      "—",
+    email: val(m.email) ?? val(m.mail) ?? "—",
+    role: "co-applicant" as MemberRole,
+  }));
   return { id, appId, submittedAt, status, members };
 }
 
@@ -196,7 +173,11 @@ async function fetchHouseholds(
     const rows = list.map(coerceToHouseholdUI).filter(Boolean) as Household[];
     const nextCursor = j?.nextCursor ? String(j.nextCursor) : null;
     const firm: FirmMeta = j?.firm
-      ? { firmId: String(j.firm.firmId), firmName: String(j.firm.firmName ?? "—"), firmSlug: j.firm.firmSlug }
+      ? {
+          firmId: String(j.firm.firmId),
+          firmName: String(j.firm.firmName ?? "—"),
+          firmSlug: j.firm.firmSlug,
+        }
       : null;
     return { rows, nextCursor, firm };
   } catch {
@@ -205,7 +186,149 @@ async function fetchHouseholds(
 }
 
 /* ------------------------------------------
-   Component
+   Card (full width + colored outline/shade)
+------------------------------------------- */
+function AppCard({
+  hh,
+  onReview,
+  leaseHref,
+  holdingHref,
+  handoffHref,
+}: {
+  hh: Household;
+  onReview: (hh: Household) => void;
+  leaseHref: string;
+  holdingHref: string;
+  handoffHref: string;
+}) {
+  const primary = hh.members?.[0];
+  const colors = colorClassesForStatus(hh.status);
+  const isMinDue = hh.status === "min_due";
+  const isMinPaid = hh.status === "min_paid";
+  const isCountersigned = hh.status === "countersigned";
+
+  return (
+    <div
+      className={clsx(
+        "w-full rounded-md border p-3 shadow-sm hover:shadow transition",
+        colors.border,
+        colors.bg
+      )}
+    >
+      {/* Header row: title + status chip */}
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-[13px] font-semibold text-gray-900 truncate">
+            Household {hh.id}
+          </div>
+        </div>
+        <span className="inline-flex items-center rounded-full bg-white/60 px-2 py-0.5 text-[10px] text-gray-700 ring-1 ring-gray-200">
+          {labelForStatus(hh.status)}
+        </span>
+      </div>
+
+      {/* Middle row: compact meta */}
+      <div className="mt-1.5 grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+        <div className="min-w-0">
+          <div className="text-[11px] text-gray-600 break-all">App: {hh.appId}</div>
+          {primary && (
+            <div className="text-[11px] text-gray-600 truncate">
+              {primary.name} • {primary.email}
+            </div>
+          )}
+        </div>
+        <div className="sm:text-right text-[11px] text-gray-500">
+          Updated {formatDate(hh.submittedAt)}
+        </div>
+      </div>
+
+      {/* Footer row: details left (hint), actions right */}
+      <div className="mt-2.5 flex items-center justify-between gap-2">
+        {/* Hint / stage note (optional; compact) */}
+        <div className="hidden sm:block text-[10px] text-gray-500">
+          {hh.status === "min_paid"
+            ? "Ready to countersign"
+            : hh.status === "min_due"
+            ? "Payment gate open"
+            : hh.status === "admin_screened"
+            ? "In review"
+            : hh.status === "approved_high"
+            ? "Approved"
+            : hh.status === "terms_set"
+            ? "Terms configured"
+            : ""}
+        </div>
+
+        {/* Actions (right-aligned) */}
+		<div className="flex flex-wrap items-center justify-end gap-1.5">
+		  {/* Review button */}
+		  <button
+			onClick={() => onReview(hh)}
+			className="rounded border border-gray-300 bg-white px-2 py-1 text-[11px] font-medium text-gray-900 hover:bg-gray-50"
+			title="Open review"
+		  >
+			Review
+		  </button>
+			{/* Chat */}
+		  <Link
+			href={{ pathname: "/landlord/chat", query: { appId: hh.appId, hh: hh.id } }}
+			className="rounded border border-gray-300 bg-white px-2 py-1 text-[11px] font-medium text-gray-900 hover:bg-gray-50"
+		  >
+			Chat
+		  </Link>
+
+		  {/* Countersigned: show BOTH setup + wrap-up */}
+		  {isCountersigned && (
+			<>
+			  <Link
+				href={leaseHref}
+				className="rounded border border-emerald-300 bg-emerald-50 px-2 py-1 text-[11px] font-medium text-emerald-800 hover:bg-emerald-100"
+				title="Lease setup"
+			  >
+				Lease setup
+			  </Link>
+			  <Link
+				href={handoffHref}
+				className="rounded border border-emerald-300 bg-emerald-50 px-2 py-1 text-[11px] font-medium text-emerald-800 hover:bg-emerald-100"
+				title="Lease wrap-up"
+			  >
+				Wrap up
+			  </Link>
+			</>
+		  )}
+
+		  {/* min_paid: ONLY show wrap-up */}
+		  {isMinPaid && (
+			<Link
+			  href={handoffHref}
+			  className="rounded border border-emerald-300 bg-emerald-50 px-2 py-1 text-[11px] font-medium text-emerald-800 hover:bg-emerald-100"
+			  title="Lease wrap-up"
+			>
+			  Wrap up
+			</Link>
+		  )}
+
+		  {/* min_due: holding/payments */}
+		  {isMinDue && (
+			<Link
+			  href={holdingHref}
+			  className="rounded border border-violet-300 bg-violet-50 px-2 py-1 text-[11px] font-medium text-violet-800 hover:bg-violet-100"
+			  title="Holding / Payment"
+			>
+			  Holding / Payment
+			</Link>
+		  )}
+
+
+		</div>
+
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------
+   Page (groups only; no extra filters)
 ------------------------------------------- */
 export default function ApplicationsDesktop() {
   const router = useRouter();
@@ -218,326 +341,159 @@ export default function ApplicationsDesktop() {
   const [loading, setLoading] = useState(true);
   const [busyMore, setBusyMore] = useState(false);
 
-  // filters
-  const [tab, setTab] = useState<"all" | "new" | "in_review" | "needs_approval" | "approved" | "rejected">("all");
-  const [q, setQ] = useState("");
-
   useEffect(() => {
     let cancelled = false;
     (async () => {
       setLoading(true);
       const { rows, nextCursor, firm } = await fetchHouseholds(undefined, firmIdFromUrl);
       if (!cancelled) {
-        // Pin countersign_ready to the very top of the master list
-        rows.sort((a, b) => {
-          const aHot = a.status === "countersign_ready" ? 1 : 0;
-          const bHot = b.status === "countersign_ready" ? 1 : 0;
-          if (aHot !== bHot) return bHot - aHot;
-          return (b.submittedAt || "").localeCompare(a.submittedAt || "");
-        });
         setRows(rows);
         setCursor(nextCursor);
         setFirm(firm);
         setLoading(false);
       }
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [firmIdFromUrl]);
 
   async function loadMore() {
     if (!cursor) return;
     setBusyMore(true);
-    const { rows: nextRows, nextCursor } = await fetchHouseholds(cursor, firmIdFromUrl);
-    const merged = [...rows, ...nextRows].sort((a, b) => {
-      const aHot = a.status === "countersign_ready" ? 1 : 0;
-      const bHot = b.status === "countersign_ready" ? 1 : 0;
-      if (aHot !== bHot) return bHot - aHot;
-      return (b.submittedAt || "").localeCompare(a.submittedAt || "");
-    });
-    setRows(merged);
+    const { rows: more, nextCursor } = await fetchHouseholds(cursor, firmIdFromUrl);
+    setRows((prev) => [...prev, ...more]);
     setCursor(nextCursor);
     setBusyMore(false);
   }
 
-  // Quick helpers
+  // helpers for actions
   const REVIEW_BASE = "/landlord/reviews";
   function onReview(hh: Household) {
     if (!hh?.appId) return;
-    const href =
-      `${REVIEW_BASE}/${encodeURIComponent(hh.appId)}` +
-      (firmIdFromUrl ? `?firmId=${encodeURIComponent(firmIdFromUrl)}` : "");
+    const href = `${REVIEW_BASE}/${encodeURIComponent(hh.appId)}${
+      firmIdFromUrl ? `?firmId=${encodeURIComponent(firmIdFromUrl)}` : ""
+    }`;
     router.push(href);
   }
-  function holdingHrefFor(hh: Household) {
-    const base = `/landlord/leases/${encodeURIComponent(hh.appId)}/holding`;
-    return firmIdFromUrl ? `${base}?firmId=${encodeURIComponent(firmIdFromUrl)}` : base;
-  }
-  function leaseHrefFor(hh: Household) {
-    const base = `/landlord/leases/${encodeURIComponent(hh.appId)}/setup`;
-    return firmIdFromUrl ? `${base}?firmId=${encodeURIComponent(firmIdFromUrl)}` : base;
-  }
+  const holdingHrefFor = (hh: Household) =>
+    firmIdFromUrl
+      ? `/landlord/leases/${encodeURIComponent(hh.appId)}/holding?firmId=${encodeURIComponent(
+          firmIdFromUrl
+        )}`
+      : `/landlord/leases/${encodeURIComponent(hh.appId)}/holding`;
+  const leaseHrefFor = (hh: Household) =>
+    firmIdFromUrl
+      ? `/landlord/leases/${encodeURIComponent(hh.appId)}/setup?firmId=${encodeURIComponent(
+          firmIdFromUrl
+        )}`
+      : `/landlord/leases/${encodeURIComponent(hh.appId)}/setup`;
+  const handoffHrefFor = (hh: Household) =>
+    firmIdFromUrl
+      ? `/landlord/leases/${encodeURIComponent(hh.appId)}/handoff?firmId=${encodeURIComponent(
+          firmIdFromUrl
+        )}`
+      : `/landlord/leases/${encodeURIComponent(hh.appId)}/handoff`;
 
-  // Priority list & quick actions
-  const countersignReady = useMemo(
-    () => rows.filter(r => r.status === "countersign_ready"),
-    [rows]
-  );
-
-  const filtered = useMemo(() => {
-    let r = [...rows];
-    if (tab !== "all") {
-      if (tab === "approved") {
-        // Include the whole approved cluster plus countersign_ready
-        r = r.filter((x) =>
-          x.status.startsWith("approved_") || x.status === "accepted_held" || x.status === "countersign_ready"
-        );
-      } else if (tab === "rejected") {
-        r = r.filter((x) => x.status === "rejected");
-      } else {
-        r = r.filter((x) => x.status === tab);
-      }
+  // group strictly by steps (no other filters)
+  const groups = useMemo(() => {
+    const buckets: Record<StageKey, Household[]> = {
+      draft: [],
+      submitted: [],
+      admin_screened: [],
+      approved_high: [],
+      terms_set: [],
+      min_due: [],
+      min_paid: [],
+      countersigned: [],
+      occupied: [],
+      closed: [],
+    };
+    for (const h of rows) {
+      const slot = STAGE_ORDER.find((s) => s.match(h.status))?.key as StageKey | undefined;
+      if (slot) buckets[slot].push(h);
     }
-    if (q.trim()) {
-      const t = q.toLowerCase();
-      r = r.filter((h) =>
-        [h.id, h.appId, h.status, h.submittedAt].join(" ").toLowerCase().includes(t)
-      );
-    }
-    // Keep countersign_ready pinned within the filtered view too
-    r.sort((a, b) => {
-      const aHot = a.status === "countersign_ready" ? 1 : 0;
-      const bHot = b.status === "countersign_ready" ? 1 : 0;
-      if (aHot !== bHot) return bHot - aHot;
-      return (b.submittedAt || "").localeCompare(a.submittedAt || "");
+    // default sort: most recent per group
+    (Object.keys(buckets) as StageKey[]).forEach((k) => {
+      buckets[k].sort((a, b) => (b.submittedAt || "").localeCompare(a.submittedAt || ""));
     });
-    return r;
-  }, [rows, tab, q]);
+    return buckets;
+  }, [rows]);
+
+  const formsHref = firmIdFromUrl
+    ? `/landlord/forms?firmId=${encodeURIComponent(firmIdFromUrl)}`
+    : "/landlord/forms";
 
   return (
     <main className="mx-auto w-full max-w-[1100px] px-6 pb-8">
-      {/* Firm header */}
-      <div className="mt-4 mb-2">
-        <div className="text-base font-semibold text-gray-900">
-          {firm?.firmName ?? "Applications"}
+      {/* Header */}
+      <div className="mt-4 mb-2 flex items-center justify-between">
+        <div>
+          <div className="text-base font-semibold text-gray-900">
+            {firm?.firmName ?? "Applications"}
+          </div>
+          {firm?.firmSlug && (
+            <div className="text-xs text-gray-600">Firm: {firm.firmSlug}</div>
+          )}
         </div>
-        {firm?.firmSlug && <div className="text-xs text-gray-600">Firm: {firm.firmSlug}</div>}
+        <Link
+          href={formsHref}
+          className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-900 hover:bg-gray-50"
+          title="Open application forms"
+        >
+          Forms
+        </Link>
       </div>
 
-      {/* Priority callout for countersign-ready */}
-      {!!countersignReady.length && (
-        <div className="mb-4 rounded-xl border border-emerald-300 bg-emerald-50 p-4">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <div className="text-sm font-semibold text-emerald-900">
-                {countersignReady.length} {countersignReady.length === 1 ? "household" : "households"} ready to countersign
-              </div>
-              <p className="mt-0.5 text-xs text-emerald-800">
-                Tenants have paid the holding funds. Create and send the lease for countersignature.
-              </p>
-            </div>
-            <div className="flex gap-2">
-              <button
-                onClick={() => {
-                  // Focus the first one immediately
-                  const first = countersignReady[0];
-                  if (first) {
-                    const href = `${leaseHrefFor(first)}`;
-                    window.location.href = href;
-                  }
-                }}
-                className="rounded-md bg-emerald-600 px-3 py-2 text-xs font-medium text-white hover:bg-emerald-700"
-              >
-                Open first
-              </button>
-              <button
-                onClick={() => setQ("countersign_ready")}
-                className="rounded-md border border-emerald-300 bg-white px-3 py-2 text-xs font-medium text-emerald-800 hover:bg-emerald-100"
-              >
-                Show only these
-              </button>
-            </div>
-          </div>
+      {/* Flow legend (once) */}
+      <div className="mb-3 text-[11px] text-gray-600">
+        <span className="font-medium text-gray-800">Flow:</span>{" "}
+        Draft → Submitted → In Review → Approved → Terms Set → Payment Due → Ready to Sign →
+        Countersigned → Occupied → Closed
+      </div>
+
+      {loading ? (
+        <div className="px-6 py-8 text-sm text-gray-600">Loading…</div>
+      ) : (
+        <div className="mt-4 space-y-6">
+          {STAGE_ORDER.map(({ key, label }) => {
+            const items = groups[key] ?? [];
+            return (
+              <section key={key}>
+                <div className="mb-2 text-sm font-semibold text-gray-900">
+                  {label}{" "}
+                  <span className="ml-1 inline-flex items-center rounded-full bg-gray-100 text-gray-700 ring-1 ring-gray-200 px-2 py-0.5 text-[11px]">
+                    {items.length}
+                  </span>
+                </div>
+
+                {items.length === 0 ? (
+                  <div className="rounded-lg border border-dashed border-gray-200 bg-gray-50 p-4 text-xs text-gray-600">
+                    No applications in this step.
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {items.map((hh) => (
+                      <AppCard
+                        key={hh.appId}
+                        hh={hh}
+                        onReview={onReview}
+                        leaseHref={leaseHrefFor(hh)}
+                        holdingHref={holdingHrefFor(hh)}
+                        handoffHref={handoffHrefFor(hh)}
+                      />
+                    ))}
+                  </div>
+                )}
+              </section>
+            );
+          })}
         </div>
       )}
 
-      {/* Toolbar */}
-      <div className="sticky top-0 z-30 -mx-6 border-b border-gray-200 bg-white/80 backdrop-blur supports-[backdrop-filter]:bg-white/60">
-        <div className="mx-auto max-w-[1100px] px-6 py-3">
-          <div className="flex items-center justify-between gap-4">
-            {/* Tabs */}
-            <div className="inline-flex rounded-lg border border-gray-300 bg-white p-0.5">
-              {(
-                [
-                  { id: "all", label: "All" },
-                  { id: "new", label: "New" },
-                  { id: "in_review", label: "In review" },
-                  { id: "needs_approval", label: "Decision" },
-                  { id: "approved", label: "Approved" },
-                  { id: "rejected", label: "Rejected" },
-                ] as const
-              ).map((t) => (
-                <button
-                  key={t.id}
-                  onClick={() => setTab(t.id)}
-                  className={clsx(
-                    "px-4 py-2 text-sm rounded-md transition whitespace-nowrap",
-                    tab === t.id ? "bg-gray-900 text-white" : "text-gray-700 hover:bg-gray-50"
-                  )}
-                  aria-pressed={tab === t.id}
-                >
-                  {t.label}
-                </button>
-              ))}
-            </div>
-
-            {/* Right: Search */}
-            <div className="relative">
-              <input
-                type="search"
-                inputMode="search"
-                enterKeyHint="search"
-                autoCapitalize="none"
-                autoCorrect="off"
-                value={q}
-                onChange={(e) => setQ(e.target.value)}
-                placeholder="Search by household id, app id, or status"
-                className="w-72 rounded-md border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-              <span className="pointer-events-none absolute right-2 top-2.5 text-gray-400">
-                <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M21 21l-4.3-4.3M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16z" stroke="currentColor" strokeWidth="2" fill="none" />
-                </svg>
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Table */}
-      <div className="mt-6">
-        <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white">
-          <table className="min-w-full table-auto divide-y divide-gray-200">
-            <thead className="bg-gray-50">
-              <tr className="text-left text-xs font-semibold uppercase tracking-wide text-gray-600">
-                <th className="px-6 py-3 min-w-[280px]">Household</th>
-                <th className="px-6 py-3 w-[360px]">Funnel</th>
-                <th className="px-6 py-3 w-[160px]">Updated</th>
-                <th className="px-6 py-3 min-w-[420px]">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {loading ? (
-                <tr>
-                  <td colSpan={4} className="px-6 py-8 text-sm text-gray-600">Loading…</td>
-                </tr>
-              ) : filtered.length === 0 ? (
-                <tr>
-                  <td colSpan={4} className="px-6 py-12 text-center text-sm text-gray-600">No applications yet,</td>
-                </tr>
-              ) : (
-                filtered.map((hh) => {
-                  const isPendingPayment   = hh.status === "approved_pending_payment";
-                  const isHeld             = hh.status === "accepted_held";
-                  const isCountersignReady = hh.status === "countersign_ready";
-
-                  const holdingHref = holdingHrefFor(hh);
-                  const leaseHref   = leaseHrefFor(hh);
-                  const hint        = nextActionCopy(hh.status);
-
-                  return (
-                    <tr
-                      key={hh.id}
-                      className={clsx(
-                        "hover:bg-gray-50/60",
-                        isCountersignReady && "bg-emerald-50/50"
-                      )}
-                    >
-                      <td className="px-6 py-4 align-top">
-                        <div className="font-medium text-gray-900 truncate">
-                          Household {hh.id}
-                        </div>
-                        <div className="mt-1 text-xs text-gray-600 break-all">App: {hh.appId}</div>
-                        {isCountersignReady && (
-                          <div className="mt-2 inline-flex items-center rounded-full bg-emerald-100 text-emerald-900 px-2 py-0.5 text-[11px] ring-1 ring-emerald-200">
-                            Ready to countersign
-                          </div>
-                        )}
-                      </td>
-
-                      <td className="px-6 py-4 align-top">
-                        <Stepper status={hh.status} />
-                        <div className="mt-1 text-[11px] text-gray-500">{hint}</div>
-                      </td>
-
-                      <td className="px-6 py-4 align-top text-sm text-gray-700">
-                        {formatDate(hh.submittedAt)}
-                      </td>
-
-                      <td className="px-6 py-4 align-top">
-                        <div className="flex flex-wrap items-center gap-2 whitespace-nowrap">
-                         
-						  {/* Lease setup fast-path when funds are held or ready to countersign */}
-                          {(isHeld || isCountersignReady) && (
-                            <Link
-                              href={leaseHref}
-                              className={clsx(
-                                "rounded-md px-3 py-1.5 text-xs font-medium",
-                                "border border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100"
-                              )}
-                              title="Proceed to lease setup"
-                            >
-                              Lease setup
-                            </Link>
-                          )}
-						  {/* Review (always) */}
-                          <button
-                            onClick={() => onReview(hh)}
-                            className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-900 hover:bg-gray-50"
-                            title="Open application review"
-                          >
-                            Review
-                          </button>
-
-                          {/* Holding / Payment manager when awaiting tenant payment */}
-                          {isPendingPayment && (
-                            <Link
-                              href={holdingHref}
-                              className="rounded-md border border-blue-300 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-800 hover:bg-blue-100"
-                              title="Open holding setup / tenant payment link"
-                            >
-                              Holding / Payment
-                            </Link>
-                          )}
-
-
-
-                          {/* Chat */}
-                          <button
-                            onClick={() => {
-                              const url = new URL("/landlord/chat", window.location.origin);
-                              url.searchParams.set("appId", (hh as any).appId);
-                              url.searchParams.set("hh", hh.id);
-                              if (firmIdFromUrl) url.searchParams.set("firmId", firmIdFromUrl);
-                              window.location.href = url.toString();
-                            }}
-                            className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-900 hover:bg-gray-50"
-                          >
-                            Chat
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
       {/* Pagination */}
       {cursor && (
-        <div className="flex justify-center my  -6">
+        <div className="flex justify-center my-6">
           <button
             disabled={busyMore}
             onClick={loadMore}

@@ -116,7 +116,6 @@ function buildCharges(appId: string, app: any): ChargeRow[] {
     for (let i = 0; i < months; i++) {
       const ym = `${year.toString().padStart(4, "0")}-${month.toString().padStart(2, "0")}`;
       push("operating", `rent:${ym}` as ChargeRow["code"], rent, basePrio + i);
-
       month += 1;
       if (month > 12) { month = 1; year += 1; }
     }
@@ -191,9 +190,9 @@ function allocateAcrossCharges(charges: ChargeRow[], payments: PaymentLite[]) {
       const posted = postedByKey.get(c.chargeKey) ?? 0;
       const pending = pendingByKey.get(c.chargeKey) ?? 0;
       const open = Math.max(0, c.amountCents - posted - pending);
-      if (open <= 0) continue;
-
       const take = Math.min(open, remaining);
+      if (take <= 0) continue;
+
       if (p.status === "succeeded") add(postedByKey, c.chargeKey, take);
       else add(pendingByKey, c.chargeKey, take);
       remaining -= take;
@@ -297,7 +296,7 @@ export async function POST(req: Request) {
         {
           userId,
           active: true,
-          householdId: hhIdObj ? { $in: [hhId, hhIdObj] } : hhId, // tolerate both storage types
+          householdId: hhIdObj ? { $in: [hhId, hhIdObj] } : hhId,
         },
         { projection: { _id: 1 } }
       );
@@ -405,10 +404,14 @@ export async function POST(req: Request) {
     const minTopUpCents = dollarsWhole(opMin);
     const maxTopUpCents = dollarsWhole(opMax);
 
-    // Deposit policy: pay minimum (or remaining) exactly
-    const depMinToPay = Number.isFinite(depMinThreshold)
+    // Deposit policy:
+    // - If a positive gate exists, require at least that minimum (capped by remaining).
+    // - If gate is 0 or not set, allow the full remaining deposit.
+    const hasDepGate = Number.isFinite(depMinThreshold) && Number(depMinThreshold) > 0;
+    const depRequired = hasDepGate
       ? Math.max(0, Math.min(depositRemainingNet, Number(depMinThreshold)))
       : Math.max(0, depositRemainingNet);
+    const depRemaining = depositRemainingNet;
 
     debug.amounts = {
       operatingRemainingNet,
@@ -418,7 +421,8 @@ export async function POST(req: Request) {
       operatingLineItemRemains,
       opMinThreshold: Number.isFinite(opMinThreshold) ? opMinThreshold : undefined,
       depMinThreshold: Number.isFinite(depMinThreshold) ? depMinThreshold : undefined,
-      depMinToPay,
+      depRequired,
+      depRemaining,
     };
 
     /* ---------- validate requested amount against policy ---------- */
@@ -435,7 +439,8 @@ export async function POST(req: Request) {
       const isLineItemExact = operatingLineItemRemains.includes(requested);
       valid = isWholeDollar && (inRange || isLineItemExact);
     } else {
-      valid = requested === depMinToPay && requested > 0;
+      // accept either the gate minimum (if any) OR the full remaining deposit
+      valid = requested > 0 && (requested === depRequired || requested === depRemaining);
     }
 
     debug.amounts.requested = requested;
@@ -455,7 +460,10 @@ export async function POST(req: Request) {
           },
         });
       } else {
-        return done(400, { error: "amount_not_allowed", detail: { bucket, requested, required: depMinToPay } });
+        return done(400, {
+          error: "amount_not_allowed",
+          detail: { bucket, requested, required: depRequired, remaining: depRemaining }
+        });
       }
     }
 
@@ -513,13 +521,12 @@ export async function POST(req: Request) {
             { $set: { updatedAt: new Date(), "meta.reused": true } }
           );
           debug.step = "reuse_existing_pi";
- return done(200, {
-   ok: true,
-   clientSecret: pi0.client_secret,
-   // pass the PI id as key (works with your result API)
-   returnUrl: `/tenant/payments/result?appId=${encodeURIComponent(appId)}&key=${encodeURIComponent(pi0.id)}`,
-  payer: { name: payerName, email: payerEmail ?? null },
- });
+          return done(200, {
+            ok: true,
+            clientSecret: pi0.client_secret,
+            returnUrl: `/tenant/payments/result?appId=${encodeURIComponent(appId)}&key=${encodeURIComponent(pi0.id)}`,
+            payer: { name: payerName, email: payerEmail ?? null },
+          });
         }
         if (confirmable && (!achOnly || !sameAmount)) {
           try { await stripe.paymentIntents.cancel(pi0.id); } catch {}
@@ -623,13 +630,13 @@ export async function POST(req: Request) {
 
     debug.step = "ok";
     if (requiresClientSide) {
- return done(200, {
-   ok: true,
-   clientSecret: pi0.client_secret,
-   // pass the PI id as key (works with your result API)
-   returnUrl: `/tenant/payments/result?appId=${encodeURIComponent(appId)}&key=${encodeURIComponent(pi0.id)}`,
-  payer: { name: payerName, email: payerEmail ?? null },
- });
+      return done(200, {
+        ok: true,
+        clientSecret: pi.client_secret!,
+        // pass the PI id as key (works with your result API)
+        returnUrl: `/tenant/payments/result?appId=${encodeURIComponent(appId)}&key=${encodeURIComponent(pi.id)}`,
+        payer: { name: payerName, email: payerEmail ?? null },
+      });
     } else {
       return done(200, { ok: true, status: pi.status, paymentIntentId: pi.id });
     }

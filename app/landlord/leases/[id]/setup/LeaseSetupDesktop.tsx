@@ -37,6 +37,45 @@ type PaymentPlan = {
   priority: string[];
 };
 
+type CanonicalStatus =
+  | "draft"
+  | "submitted"
+  | "admin_screened"
+  | "approved_high"
+  | "terms_set"
+  | "min_due"
+  | "min_paid"
+  | "countersigned"
+  | "occupied"
+  | "rejected"
+  | "withdrawn"
+  | "countersign_ready"; // extra for this page
+
+const STATUS_LABELS: Record<CanonicalStatus, string> = {
+  draft: "Draft",
+  submitted: "Submitted",
+  admin_screened: "In review",
+  approved_high: "Approved",
+  terms_set: "Terms set",
+  min_due: "Payment due",
+  min_paid: "Ready to sign",
+  countersigned: "Countersigned",
+  occupied: "Occupied",
+  rejected: "Rejected",
+  withdrawn: "Withdrawn",
+  countersign_ready: "Countersign ready",
+};
+
+function prettyStatus(raw: string | null | undefined): string {
+  if (!raw) return "—";
+  const s = raw as CanonicalStatus;
+  if (s in STATUS_LABELS) return STATUS_LABELS[s];
+  // Fallback: title-case the raw value
+  return raw
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 type AppLite = {
   id: string;
   status?: string | null; // e.g. "countersign_ready"
@@ -313,6 +352,14 @@ export default function LeaseSetupDesktop() {
   const rawId = (params as Record<string, string | string[] | undefined>)?.id;
   const appId = Array.isArray(rawId) ? rawId[0] : (rawId as string | undefined);
   const firmId = search.get("firmId") || undefined;
+  
+  const appsHref = React.useMemo(
+	  () =>
+		firmId
+		  ? `/landlord/applications?firmId=${encodeURIComponent(firmId)}`
+		  : "/landlord/applications",
+	  [firmId]
+	);
 
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState<string | null>(null);
@@ -522,19 +569,23 @@ export default function LeaseSetupDesktop() {
     } catch {
       planRes = null;
     }
+	
+	if (!planRes || !planRes.ok) {
+	  let msg = "Saved basics, but failed to save the financial plan,";
+	  try {
+		const j = await planRes?.json();
+		if (j?.error) msg = String(j.error);
+	  } catch {}
+	  setToast(msg);
+	  return;
+	}
 
-    if (!planRes || !planRes.ok) {
-      let msg = "Saved basics, but failed to save the financial plan,";
-      try {
-        const j = await planRes?.json();
-        if (j?.error) msg = String(j.error);
-      } catch {}
-      setToast(msg);
-      return;
-    }
-
-    setToast("Lease basics saved,");
-    setTimeout(() => setToast(null), 1200);
+	// Success: toast, then hop back to Applications
+	setToast("Lease basics saved,");
+	setTimeout(() => {
+	  setToast(null);
+	  router.push(appsHref);
+	}, 800);
   }
 
   // Compute a safe moveOut for creation if needed
@@ -864,10 +915,10 @@ export default function LeaseSetupDesktop() {
             <div className="rounded-xl border border-gray-200 bg-white p-5 text-sm">
               <div className="font-semibold text-gray-900">Application snapshot</div>
               <dl className="mt-2 space-y-1">
-                <div className="flex justify-between gap-4">
-                  <dt className="text-gray-500">Status</dt>
-                  <dd className="text-gray-900">{app?.status || "—"}</dd>
-                </div>
+				<div className="flex justify-between gap-4">
+				  <dt className="text-gray-500">Status</dt>
+				  <dd className="text-gray-900">{prettyStatus(app?.status)}</dd>
+				</div>
                 <div className="flex justify-between gap-4">
                   <dt className="text-gray-500">Unit</dt>
                   <dd className="text-gray-900">{app?.unit?.unitNumber || "—"}</dd>

@@ -13,10 +13,12 @@ function parseDateOnly(ymd?: string | null): Date | null {
   if (!y || !m || !d) return null;
   return new Date(y, m - 1, d, 0, 0, 0, 0);
 }
+
 function startOfTodayLocal(): Date {
   const t = new Date();
   return new Date(t.getFullYear(), t.getMonth(), t.getDate(), 0, 0, 0, 0);
 }
+
 const norm = (v: any) => (v == null ? null : String(v));
 
 type ChecklistItem = {
@@ -26,14 +28,84 @@ type ChecklistItem = {
   completedAt?: string | null;
   notes?: string | null;
 };
+
 function defaultChecklist(dueISO: string): ChecklistItem[] {
   return [
     { key: "id_upload",            label: "Upload government ID",        dueAt: dueISO, completedAt: null, notes: null },
     { key: "renter_insurance",     label: "Provide renter’s insurance",  dueAt: dueISO, completedAt: null, notes: null },
-    { key: "schedule_walkthrough", label: "Pre-Move Inspection",        dueAt: dueISO, completedAt: null, notes: null },
+    { key: "schedule_walkthrough", label: "Pre-Move Inspection",         dueAt: dueISO, completedAt: null, notes: null },
     { key: "keys",                 label: "Pick up keys / access fobs",  dueAt: dueISO, completedAt: null, notes: null },
     { key: "rent_autopay",         label: "Set up rent autopay",         dueAt: dueISO, completedAt: null, notes: null },
   ];
+}
+
+/* ── S3 document helpers ─────────────────────────────────── */
+
+const S3_PUBLIC_BASE = process.env.S3_PUBLIC_BASE_URL || "";
+// e.g. S3_PUBLIC_BASE_URL="https://my-bucket.s3.us-east-1.amazonaws.com"
+
+const S3_LEASE_DOCS_PREFIX = process.env.S3_LEASE_DOCS_PREFIX || "leases";
+// e.g. "leases" → leases/<leaseId>/<docId>.pdf
+
+const S3_LEASE_DOCS_EXT = process.env.S3_LEASE_DOCS_EXT || ".pdf";
+// e.g. ".pdf"
+
+type LeaseDocument = {
+  id: string;
+  title: string;
+  externalDescription?: string | null;
+  url?: string | null;   // public S3 (or presigned) URL
+  s3Key?: string | null; // underlying S3 key we derived
+};
+
+/**
+ * Build an S3 key for a given lease + doc.
+ * You can change just this function if your pattern is different.
+ */
+function buildS3KeyForLeaseDoc(leaseDoc: any, rawDoc: any): string | null {
+  const leaseId = norm(leaseDoc?._id);
+  const docId = norm(rawDoc?.id ?? rawDoc?._id);
+  if (!leaseId || !docId) return null;
+
+  // leases/<leaseId>/<docId>.pdf   (configurable via env)
+  const prefix = S3_LEASE_DOCS_PREFIX.replace(/\/$/, ""); // drop trailing slash
+  const ext = S3_LEASE_DOCS_EXT.startsWith(".") ? S3_LEASE_DOCS_EXT : `.${S3_LEASE_DOCS_EXT}`;
+
+  return `${prefix}/${encodeURIComponent(leaseId)}/${encodeURIComponent(docId)}${ext}`;
+}
+
+function mapLeaseDocument(raw: any, parentLease: any): LeaseDocument | null {
+  if (!raw) return null;
+
+  const id = norm(raw.id ?? raw._id);
+  if (!id) return null;
+
+  const title = String(raw.title ?? "Document");
+  const externalDescription =
+    raw.externalDescription != null ? String(raw.externalDescription) : null;
+
+  // If the DB already has url/s3Key, respect them
+  let s3Key: string | null = raw.s3Key ?? null;
+  let url: string | null = raw.url ?? null;
+
+  // If nothing present, derive an S3 key from lease + doc
+  if (!s3Key) {
+    s3Key = buildS3KeyForLeaseDoc(parentLease, raw);
+  }
+
+  // If we have a key and a base URL, build the public URL
+  if (!url && s3Key && S3_PUBLIC_BASE) {
+    const base = S3_PUBLIC_BASE.replace(/\/$/, "");
+    url = `${base}/${s3Key}`;
+  }
+
+  return {
+    id,
+    title,
+    externalDescription,
+    url,
+    s3Key,
+  };
 }
 
 export async function GET() {
@@ -56,7 +128,10 @@ export async function GET() {
     const hm = await memberships.findOne({ userId: userIdStr, active: true });
     if (!hm) {
       console.warn("[lease][hm] no active household for user", { userIdStr });
-      return NextResponse.json({ ok: true, leases: { current: null, upcoming: [], past: [], all: [] } }, { status: 200 });
+      return NextResponse.json(
+        { ok: true, leases: { current: null, upcoming: [], past: [], all: [] } },
+        { status: 200 }
+      );
     }
 
     // tolerant matcher (string/ObjectId)
@@ -76,8 +151,14 @@ export async function GET() {
 
     // === fetch from BOTH collections ===
     const [rawA, rawB] = await Promise.all([
-      leasesColPrimary.find({ householdId: hhMatch }).sort({ moveInDate: 1, createdAt: 1 }).toArray(),
-      leasesColAlt.find({ householdId: hhMatch }).sort({ moveInDate: 1, createdAt: 1 }).toArray(),
+      leasesColPrimary
+        .find({ householdId: hhMatch })
+        .sort({ moveInDate: 1, createdAt: 1 })
+        .toArray(),
+      leasesColAlt
+        .find({ householdId: hhMatch })
+        .sort({ moveInDate: 1, createdAt: 1 })
+        .toArray(),
     ]);
 
     // merge + de-dupe by _id
@@ -113,6 +194,7 @@ export async function GET() {
         }
       }
     };
+
     // decide which collection each doc came from (by presence in rawA/rawB)
     const idInA = new Set(rawA.map((d: any) => norm(d._id)!));
     for (const doc of allRaw) {
@@ -141,19 +223,39 @@ export async function GET() {
       }
     }
 
-    upcoming.sort((a, b) => (parseDateOnly(a.moveInDate)!.getTime() - parseDateOnly(b.moveInDate)!.getTime()));
-    past.sort((a, b) => (parseDateOnly(b.moveOutDate ?? b.moveInDate)?.getTime() ?? 0) - (parseDateOnly(a.moveOutDate ?? a.moveInDate)?.getTime() ?? 0));
+    upcoming.sort(
+      (a, b) =>
+        parseDateOnly(a.moveInDate)!.getTime() -
+        parseDateOnly(b.moveInDate)!.getTime()
+    );
+    past.sort(
+      (a, b) =>
+        (parseDateOnly(b.moveOutDate ?? b.moveInDate)?.getTime() ?? 0) -
+        (parseDateOnly(a.moveOutDate ?? a.moveInDate)?.getTime() ?? 0)
+    );
 
     const normalize = (doc: any) =>
-      doc ? {
-        ...doc,
-        _id:        norm(doc._id),
-        firmId:     norm(doc.firmId),
-        appId:      norm(doc.appId),
-        householdId:norm(doc.householdId),
-        propertyId: norm(doc.propertyId),
-        unitId:     norm(doc.unitId),
-      } : null;
+      doc
+        ? (() => {
+            const docsRaw = Array.isArray(doc.documents) ? doc.documents : [];
+            const documents = docsRaw
+              .map((raw) => mapLeaseDocument(raw, doc))
+              .filter((d): d is LeaseDocument => !!d);
+
+            return {
+              ...doc,
+              _id:        norm(doc._id),
+              firmId:     norm(doc.firmId),
+              appId:      norm(doc.appId),
+              householdId:norm(doc.householdId),
+              propertyId: norm(doc.propertyId),
+              unitId:     norm(doc.unitId),
+
+              // normalized documents with S3 URL + key
+              documents,
+            };
+          })()
+        : null;
 
     const payload = {
       current: normalize(current),
@@ -172,6 +274,9 @@ export async function GET() {
     return NextResponse.json({ ok: true, leases: payload }, { status: 200 });
   } catch (e: any) {
     console.error("[lease][error]", e);
-    return NextResponse.json({ ok: false, error: "server_error", detail: e?.message }, { status: 500 });
+    return NextResponse.json(
+      { ok: false, error: "server_error", detail: e?.message },
+      { status: 500 }
+    );
   }
 }

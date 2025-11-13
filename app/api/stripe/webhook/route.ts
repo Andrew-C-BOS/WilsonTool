@@ -3,6 +3,12 @@ import Stripe from "stripe";
 import { getDb } from "@/lib/db";
 import { getMailer } from "@/lib/mailer";
 
+import {
+  computeNextState,
+  deriveMinRulesFromPlan,
+  type AppState,
+} from "@/domain/rules";
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
@@ -216,7 +222,9 @@ async function recomputeAndMaybeFlip(opts: {
   const { db, appId, firmId, debug } = opts;
   const obligations = db.collection("obligations");
   const applications = db.collection("applications");
+  const payments = db.collection("payments");
 
+  // 1) Optional: still compute "due" from obligations (for logging / future UI)
   const obls = await obligations.find(
     { appId, firmId },
     { projection: { group: 1, amountCents: 1, paidCents: 1 } }
@@ -224,42 +232,125 @@ async function recomputeAndMaybeFlip(opts: {
 
   let upfrontDue = 0, depositDue = 0;
   for (const o of obls) {
-    const due = Math.max(0, Number(o.amountCents || 0) - Math.max(0, Number(o.paidCents || 0)));
-    if (o.group === "deposit") depositDue += due;
-    else upfrontDue += due;
+    const amount = Math.max(0, Number(o.amountCents || 0));
+    const paid = Math.max(0, Number(o.paidCents || 0));
+    const due = Math.max(0, amount - paid);
+
+    if (o.group === "deposit") {
+      depositDue += due;
+    } else {
+      upfrontDue += due;
+    }
   }
 
+  // 2) Compute PAID totals directly from succeeded payments
+  const payRows = await payments.find(
+    { appId, firmId, status: "succeeded" },
+    { projection: { kind: 1, amountCents: 1, meta: 1 } }
+  ).toArray();
+
+  let upfrontPaid = 0;
+  let depositPaid = 0;
+
+  for (const p of payRows) {
+    const amt = Math.max(0, Number(p.amountCents || 0));
+    const k = String(p.kind || "").toLowerCase();
+
+    if (k === "deposit") {
+      depositPaid += amt;
+    } else if (k === "upfront" || k === "operating") {
+      // treat "operating" payments as standard upfront money for gating
+      upfrontPaid += amt;
+    }
+  }
+
+  // 3) Load application to get plan + countersign + current status
+  const appFilter = await asFilter(appId);
   const app = await applications.findOne(
-    { _id: (await asFilter(appId))._id },
+    { _id: appFilter._id },
     { projection: { countersign: 1, paymentPlan: 1, status: 1 } }
   );
 
-  const upMin = Number(app?.countersign?.upfrontMinCents ?? app?.paymentPlan?.countersignUpfrontThresholdCents ?? NaN);
-  const depMin = Number(app?.countersign?.depositMinCents ?? app?.paymentPlan?.countersignDepositThresholdCents ?? NaN);
+  if (!app) {
+    dpush(debug, "recompute_no_app", { appId });
+    return { upfrontDue, depositDue, upfrontPaid, depositPaid, nextStatus: null };
+  }
 
-  const upGateSatisfied = Number.isFinite(upMin) ? upfrontDue <= 0 : null;
-  const depGateSatisfied = Number.isFinite(depMin) ? depositDue <= 0 : null;
+  const plan = app.paymentPlan ?? null;
 
-  dpush(debug, "recomputed_due", { upfrontDue, depositDue, upMin, depMin, upGateSatisfied, depGateSatisfied });
+  // Derive minRules from clamped thresholds (prefer countersign, fallback to plan)
+  const minRules = deriveMinRulesFromPlan({
+    countersignUpfrontThresholdCents:
+      app.countersign?.upfrontMinCents ?? plan?.countersignUpfrontThresholdCents,
+    countersignDepositThresholdCents:
+      app.countersign?.depositMinCents ?? plan?.countersignDepositThresholdCents,
+  });
 
-  if ((upGateSatisfied !== false) && (depGateSatisfied !== false)) {
+  const paymentTotals = {
+    upfront: upfrontPaid,
+    deposit: depositPaid,
+  };
+
+  const currentStatus = String(app.status ?? "approved_high") as AppState;
+
+  dpush(debug, "recomputed_due", {
+    upfrontDue,
+    depositDue,
+    upfrontPaid,
+    depositPaid,
+    minRules,
+    currentStatus,
+    paymentTotals,
+  });
+
+  // 4) Ask the rules engine what the next state should be
+  const nextStatus = computeNextState(
+    currentStatus,
+    "payment_updated",
+    "system",
+    {
+      minRules,
+      paymentTotals,
+    }
+  );
+
+  // 5) If state changed (e.g. min_due -> min_paid), persist it + timeline
+  if (nextStatus !== currentStatus) {
+    const now = new Date();
     await applications.updateOne(
-      { _id: (await asFilter(appId))._id },
+      { _id: appFilter._id },
       {
-        $set: { status: "countersign_ready", updatedAt: new Date() },
+        $set: { status: nextStatus, updatedAt: now },
         $push: {
           timeline: {
-            at: new Date(),
+            at: now,
             by: "system",
             event: "payments.gates_satisfied",
-            meta: { upfrontDue, depositDue, upMin: Number.isFinite(upMin) ? upMin : null, depMin: Number.isFinite(depMin) ? depMin : null },
+            meta: {
+              from: currentStatus,
+              to: nextStatus,
+              upfrontDue,
+              depositDue,
+              upfrontPaid,
+              depositPaid,
+              minRules,
+            },
           },
         },
       }
     );
+    dpush(debug, "status_flipped", { from: currentStatus, to: nextStatus });
   }
 
-  return { upfrontDue, depositDue, upMin: Number.isFinite(upMin) ? upMin : null, depMin: Number.isFinite(depMin) ? depMin : null };
+  return {
+    upfrontDue,
+    depositDue,
+    upfrontPaid,
+    depositPaid,
+    minRules,
+    currentStatus,
+    nextStatus,
+  };
 }
 
 /* ───────────────────────────────────────────────────────────

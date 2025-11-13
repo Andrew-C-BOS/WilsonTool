@@ -158,27 +158,55 @@ async function buildMembershipIdToUserIdMap(db: any, householdId: string | null)
   return map;
 }
 
-/** Re-key an answersByMember object from possibly membershipId keys -> userId keys */
+/** Re-key an answersByMember object from possibly membershipId keys -> userId keys,
+ *  and also remap questionId -> question.label where possible.
+ */
 function rekeyAnswersByMemberToUserId(
   answersByMember: Record<string, any> | undefined,
-  m2u: Map<string, string>
+  m2u: Map<string, string>,
+  questionLabelById: Record<string, string>
 ): Record<string, { role: string; email: string; answers: Record<string, any> }> {
   const out: Record<string, { role: string; email: string; answers: Record<string, any> }> = {};
   if (!answersByMember || typeof answersByMember !== "object") return out;
+
   for (const [key, val] of Object.entries(answersByMember)) {
     const userKey = m2u.get(key) ?? key;
     const role = String((val as any)?.role ?? "co_applicant");
     const email = String((val as any)?.email ?? "").toLowerCase();
-    const answers = ((val as any)?.answers && typeof (val as any).answers === "object") ? (val as any).answers : {};
-    if (!out[userKey]) out[userKey] = { role, email, answers: { ...answers } };
-    else out[userKey] = { role, email: out[userKey].email || email, answers: { ...out[userKey].answers, ...answers } };
+
+    const rawAnswers =
+      (val as any)?.answers && typeof (val as any).answers === "object"
+        ? (val as any).answers
+        : {};
+
+    const mappedAnswers: Record<string, any> = {};
+    for (const [qid, answer] of Object.entries(rawAnswers)) {
+      const label = questionLabelById[qid] || qid;
+      mappedAnswers[label] = answer;
+    }
+
+    if (!out[userKey]) {
+      out[userKey] = { role, email, answers: { ...mappedAnswers } };
+    } else {
+      out[userKey] = {
+        role,
+        email: out[userKey].email || email,
+        answers: { ...out[userKey].answers, ...mappedAnswers },
+      };
+    }
   }
+
   return out;
 }
 
-/** Derive answersByRole from answersByMember + known member roles */
+/** Derive answersByRole from answersByMember + known member roles.
+ *  At this point bucket.answers are already label-keyed, so we just merge.
+ */
 function deriveAnswersByRole(
-  answersByMemberUserId: Record<string, { role: string; email: string; answers: Record<string, any> }>,
+  answersByMemberUserId: Record<
+    string,
+    { role: string; email: string; answers: Record<string, any> }
+  >,
   members: Array<{ userId?: string; role?: string }>
 ): Record<string, Record<string, any>> {
   const roleOfUser: Record<string, string> = {};
@@ -186,11 +214,73 @@ function deriveAnswersByRole(
     if (m?.userId) roleOfUser[String(m.userId)] = String(m.role ?? "co_applicant");
   }
   const byRole: Record<string, Record<string, any>> = {};
+
   for (const [uid, bucket] of Object.entries(answersByMemberUserId)) {
     const role = String(roleOfUser[uid] ?? bucket.role ?? "co_applicant").toLowerCase();
-    byRole[role] = { ...(byRole[role] || {}), ...bucket.answers };
+    const labelAnswers = bucket.answers || {};
+    byRole[role] = { ...(byRole[role] || {}), ...labelAnswers };
   }
+
   return byRole;
+}
+
+/* ---------- Section + question meta, for grouping ---------- */
+type QuestionMeta = {
+  label: string;
+  sectionId?: string;
+  sectionTitle?: string;
+};
+
+/** Build member -> sections -> questionLabel -> answer */
+function deriveAnswersByMemberAndSection(
+  rawAnswersByMember: Record<string, any> | undefined,
+  m2u: Map<string, string>,
+  questionMetaById: Record<string, QuestionMeta>
+): Record<
+  string,
+  {
+    role: string;
+    email: string;
+    sections: Record<string, Record<string, any>>;
+  }
+> {
+  const out: Record<
+    string,
+    { role: string; email: string; sections: Record<string, Record<string, any>> }
+  > = {};
+
+  if (!rawAnswersByMember || typeof rawAnswersByMember !== "object") return out;
+
+  for (const [membershipKey, bucketAny] of Object.entries(rawAnswersByMember)) {
+    const bucket = bucketAny as any;
+    const userKey = m2u.get(membershipKey) ?? membershipKey;
+    const role = String(bucket?.role ?? "co_applicant");
+    const email = String(bucket?.email ?? "").toLowerCase();
+
+    if (!out[userKey]) {
+      out[userKey] = { role, email, sections: {} };
+    } else {
+      // keep existing role/email if already present, fill email if missing
+      if (!out[userKey].email && email) out[userKey].email = email;
+    }
+
+    const rawAnswers =
+      bucket?.answers && typeof bucket.answers === "object" ? bucket.answers : {};
+
+    for (const [qid, value] of Object.entries(rawAnswers)) {
+      const meta = questionMetaById[qid] || {};
+      const label = meta.label || qid;
+      const sectionTitle = meta.sectionTitle || "Other";
+
+      if (!out[userKey].sections[sectionTitle]) {
+        out[userKey].sections[sectionTitle] = {};
+      }
+
+      out[userKey].sections[sectionTitle][label] = value;
+    }
+  }
+
+  return out;
 }
 
 /* ---------- Normalizers for countersign & plan ---------- */
@@ -207,10 +297,15 @@ function normalizePaymentPlan(app: any) {
   const plan = app?.paymentPlan ?? null;
   if (!plan && !app?.protoLease) return null;
 
-  const monthlyRentCents =
-    Number(plan?.monthlyRentCents ?? app?.protoLease?.monthlyRent ?? 0);
-  const termMonths = Number(plan?.termMonths ?? app?.protoLease?.termMonths ?? 0);
-  const startDate = String(plan?.startDate ?? app?.protoLease?.moveInDate ?? "");
+  const monthlyRentCents = Number(
+    plan?.monthlyRentCents ?? app?.protoLease?.monthlyRent ?? 0
+  );
+  const termMonths = Number(
+    plan?.termMonths ?? app?.protoLease?.termMonths ?? 0
+  );
+  const startDate = String(
+    plan?.startDate ?? app?.protoLease?.moveInDate ?? ""
+  );
 
   return {
     monthlyRentCents,
@@ -220,8 +315,12 @@ function normalizePaymentPlan(app: any) {
     keyFeeCents: Number(plan?.keyFeeCents ?? 0),
     requireFirstBeforeMoveIn: Boolean(plan?.requireFirstBeforeMoveIn),
     requireLastBeforeMoveIn: Boolean(plan?.requireLastBeforeMoveIn),
-    countersignUpfrontThresholdCents: Number(plan?.countersignUpfrontThresholdCents ?? 0),
-    countersignDepositThresholdCents: Number(plan?.countersignDepositThresholdCents ?? 0),
+    countersignUpfrontThresholdCents: Number(
+      plan?.countersignUpfrontThresholdCents ?? 0
+    ),
+    countersignDepositThresholdCents: Number(
+      plan?.countersignDepositThresholdCents ?? 0
+    ),
     upfrontTotals: {
       firstCents: Number(plan?.upfrontTotals?.firstCents ?? 0),
       lastCents: Number(plan?.upfrontTotals?.lastCents ?? 0),
@@ -243,7 +342,10 @@ export async function GET(
 
   const user = await getSessionUser();
   if (!user) {
-    return NextResponse.json({ ok: false, error: "not_authenticated" }, { status: 401 });
+    return NextResponse.json(
+      { ok: false, error: "not_authenticated" },
+      { status: 401 }
+    );
   }
 
   try {
@@ -268,7 +370,16 @@ export async function GET(
           ...((anyIdQuery(formIdRaw, ["id"]) as any).$or ?? []),
         ],
       },
-      { projection: { _id: 1, firmId: 1, name: 1, sections: 1, questions: 1, qualifications: 1 } }
+      {
+        projection: {
+          _id: 1,
+          firmId: 1,
+          name: 1,
+          sections: 1,
+          questions: 1,
+          qualifications: 1,
+        },
+      }
     );
     if (!form) throw new HttpError(400, "form_not_found");
 
@@ -276,6 +387,34 @@ export async function GET(
     const owningFirmId = form.firmId || app.firmId;
     if (owningFirmId && String(owningFirmId) !== String(firm.firmId)) {
       throw new HttpError(403, "not_in_firm");
+    }
+
+    // Build section + question maps
+    const sectionsArray: any[] = Array.isArray(form.sections) ? form.sections : [];
+    const questionsArray: any[] = Array.isArray(form.questions) ? form.questions : [];
+
+    const sectionTitleById: Record<string, string> = {};
+    for (const s of sectionsArray) {
+      if (s && s.id && s.title) {
+        sectionTitleById[String(s.id)] = String(s.title);
+      }
+    }
+
+    const questionLabelById: Record<string, string> = {};
+    const questionMetaById: Record<string, QuestionMeta> = {};
+    for (const q of questionsArray) {
+      if (!q || !q.id) continue;
+      const idStr = String(q.id);
+      const label = String(q.label ?? idStr);
+      const sectionId = q.sectionId ? String(q.sectionId) : undefined;
+      const sectionTitle = sectionId ? sectionTitleById[sectionId] : undefined;
+
+      questionLabelById[idStr] = label;
+      questionMetaById[idStr] = {
+        label,
+        sectionId,
+        sectionTitle,
+      };
     }
 
     // Membership map for canonical userId keys
@@ -294,9 +433,25 @@ export async function GET(
         }))
       : [];
 
-    // Answers
-    const answersByMemberUserId = rekeyAnswersByMemberToUserId(app.answersByMember, m2u);
-    const answersByRole = deriveAnswersByRole(answersByMemberUserId, members);
+    // Answers (label-keyed by member)
+    const answersByMemberUserId = rekeyAnswersByMemberToUserId(
+      app.answersByMember,
+      m2u,
+      questionLabelById
+    );
+
+    // Flattened answers by role -> { questionLabel: answer }
+    const answersByRole = deriveAnswersByRole(
+      answersByMemberUserId,
+      members
+    );
+
+    // Member + section grouping
+    const answersByMemberSections = deriveAnswersByMemberAndSection(
+      app.answersByMember,
+      m2u,
+      questionMetaById
+    );
 
     // Normalize countersign & plan (always present in response as object or null)
     const countersign = normalizeCountersign(app.countersign);
@@ -309,8 +464,12 @@ export async function GET(
       updatedAt: toISO(app.updatedAt),
       submittedAt: toISO(app.submittedAt),
       members,
+      // per-member, label-keyed
       answersByMember: answersByMemberUserId,
+      // per-role, flat (label -> answer) – if you still want it
       answers: answersByRole,
+      // per-member, per-section, label -> answer
+      answersByMemberSections,
       timeline: Array.isArray(app.timeline)
         ? app.timeline.map((t: any) => ({
             at: toISO(t.at),
@@ -323,17 +482,18 @@ export async function GET(
       unit: app.unit ?? null,
       protoLease: app.protoLease ?? null,
 
-      // NEW: consistent outputs
-      countersign,     // { allowed, upfrontMinCents, depositMinCents } | null
-      paymentPlan,     // { monthlyRentCents, termMonths, startDate, ... } | null
+      countersign,
+      paymentPlan,
     };
 
     const formLite = {
       id: String(form._id ?? form.id),
       name: String(form.name || "Untitled"),
-      sections: Array.isArray(form.sections) ? form.sections : [],
-      questions: Array.isArray(form.questions) ? form.questions : [],
-      qualifications: Array.isArray(form.qualifications) ? form.qualifications : [],
+      sections: sectionsArray,
+      questions: questionsArray,
+      qualifications: Array.isArray(form.qualifications)
+        ? form.qualifications
+        : [],
     };
 
     return NextResponse.json({ ok: true, firm, application, form: formLite });
@@ -341,6 +501,9 @@ export async function GET(
     if (e instanceof HttpError) {
       return NextResponse.json(e.payload, { status: e.status });
     }
-    return NextResponse.json({ ok: false, error: "server_error" }, { status: 500 });
+    return NextResponse.json(
+      { ok: false, error: "server_error" },
+      { status: 500 }
+    );
   }
 }

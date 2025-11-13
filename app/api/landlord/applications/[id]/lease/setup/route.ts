@@ -139,6 +139,13 @@ async function resolveFirmIdForApp(db: any, formId: IdLike): Promise<string> {
  *   holding?: { amountCents: number, provider?: "stripe"|"offline"|"none", token?: string|null }
  * }
  */
+ 
+ export async function POST() {
+  return NextResponse.json(
+    { ok: false, error: "deprecated_endpoint" },
+    { status: 410 } // Gone
+  );
+}
 export async function POST(req: Request, { params }: { params: { id: string } }) {
   const user = await getSessionUser();
   if (!user) return NextResponse.json({ ok: false, error: "not_authenticated" }, { status: 401 });

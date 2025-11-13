@@ -7,7 +7,18 @@ import LocalTime from "@/app/components/Time";
 
 /* ---------- Types ---------- */
 type MemberRole = "primary" | "co_applicant" | "cosigner" | "co-applicant";
-type AppStatus = string;
+type AppStatus =
+  | "draft"
+  | "submitted"
+  | "admin_screened"
+  | "approved_high"
+  | "terms_set"
+  | "min_due"
+  | "min_paid"
+  | "countersigned"
+  | "occupied"
+  | "rejected"
+  | "withdrawn";
 
 type Member = {
   userId?: string;
@@ -37,6 +48,12 @@ type FormLite = {
 
 type TimelineEvent = { at: string; by?: string; event: string; meta?: Record<string, any> };
 
+type MemberSectionBucket = {
+  role: MemberRole;
+  email: string;
+  sections: Record<string, Record<string, any>>; // sectionTitle -> { questionLabel -> answer }
+};
+
 type ReviewBundle = {
   id: string;
   status: AppStatus;
@@ -45,10 +62,8 @@ type ReviewBundle = {
   submittedAt?: string | null;
   form: FormLite;
   members: Member[];
-  // canonical
   answersByMember?: Record<string, { role: MemberRole; email: string; answers: Record<string, any> }>;
-  // legacy
-  answersByRole: Record<string, Record<string, any>>;
+  answersByMemberSections?: Record<string, MemberSectionBucket>;
   timeline: TimelineEvent[];
   building?: {
     addressLine1: string;
@@ -84,28 +99,70 @@ function Badge({
     rose: "bg-rose-50 text-rose-700 ring-rose-200",
   } as const;
   return (
-    <span className={clsx("inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-medium ring-1 ring-inset", map[tone])}>
+    <span
+      className={clsx(
+        "inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-medium ring-1 ring-inset",
+        map[tone]
+      )}
+    >
       {children}
     </span>
   );
 }
+
+/** New canonical state chip */
 function StatusChip({ status }: { status: AppStatus }) {
-  const tone =
-    status === "new" ? "blue" :
-    status === "in_review" ? "amber" :
-    status === "needs_approval" ? "violet" :
-    status === "approved_ready_to_lease" ? "emerald" :
-    status === "approved_pending_lease" ? "emerald" :
-    "rose";
+  const tone: "gray" | "blue" | "amber" | "violet" | "emerald" | "rose" =
+    status === "draft"
+      ? "gray"
+      : status === "submitted"
+      ? "blue"
+      : status === "admin_screened"
+      ? "amber"
+      : status === "approved_high"
+      ? "violet"
+      : status === "terms_set"
+      ? "violet"
+      : status === "min_due"
+      ? "violet"
+      : status === "min_paid"
+      ? "emerald"
+      : status === "countersigned"
+      ? "emerald"
+      : status === "occupied"
+      ? "emerald"
+      : status === "rejected" || status === "withdrawn"
+      ? "rose"
+      : "gray";
+
   const label =
-    status === "new" ? "New" :
-    status === "in_review" ? "In review" :
-    status === "needs_approval" ? "Needs approval" :
-    status === "approved_ready_to_lease" ? "Approved · Ready to lease" :
-    status === "approved_pending_lease" ? "Approved" :
-    "Rejected";
-  return <Badge tone={tone as any}>{label}</Badge>;
+    status === "draft"
+      ? "Draft"
+      : status === "submitted"
+      ? "Submitted"
+      : status === "admin_screened"
+      ? "In review"
+      : status === "approved_high"
+      ? "Approved"
+      : status === "terms_set"
+      ? "Terms set"
+      : status === "min_due"
+      ? "Payment due"
+      : status === "min_paid"
+      ? "Ready to sign"
+      : status === "countersigned"
+      ? "Countersigned"
+      : status === "occupied"
+      ? "Occupied"
+      : status === "rejected"
+      ? "Rejected"
+      : status === "withdrawn"
+      ? "Withdrawn"
+      : "—";
+
+  return <Badge tone={tone}>{label}</Badge>;
 }
+
 function Toast({ text, onClose }: { text: string; onClose: () => void }) {
   if (!text) return null;
   return (
@@ -125,7 +182,9 @@ const isTruthyId = (s?: string | null) =>
   !!s && s !== "undefined" && s !== "null" && s.trim().length >= 12;
 
 const API = (id: string, firmId?: string) =>
-  `/api/landlord/applications/${encodeURIComponent(id)}${firmId ? `?firmId=${encodeURIComponent(firmId)}` : ""}`;
+  `/api/landlord/applications/${encodeURIComponent(id)}${
+    firmId ? `?firmId=${encodeURIComponent(firmId)}` : ""
+  }`;
 
 function normalizeRole(v: any): MemberRole {
   const s = String(v ?? "").toLowerCase().replace("_", "-");
@@ -133,20 +192,9 @@ function normalizeRole(v: any): MemberRole {
   if (s === "primary" || s === "cosigner") return s as MemberRole;
   return "co-applicant";
 }
-function labelize(key: string) {
-  const map: Record<string, string> = {
-    q_name: "Name",
-    q_email: "Email",
-    q_phone: "Phone",
-    q_dob: "Date of birth",
-    q_curr_addr: "Current address",
-    q_employer: "Employer",
-    q_income: "Monthly income",
-  };
-  if (map[key]) return map[key];
-  return key.replace(/^q_/, "").replace(/_/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
-}
-const centsToDollars = (c?: number | null) => (typeof c === "number" && c > 0 ? (c / 100).toFixed(2) : "");
+
+const centsToDollars = (c?: number | null) =>
+  typeof c === "number" && c > 0 ? (c / 100).toFixed(2) : "";
 
 /** add N months to yyyy-mm-dd */
 function addMonthsISO(startISO: string, months: number): string {
@@ -177,25 +225,33 @@ async function fetchBundle(appId: string, firmId?: string): Promise<ReviewBundle
       name: m.name,
     }));
 
-    const answersByMember = (app.answersByMember && typeof app.answersByMember === "object")
-      ? app.answersByMember as Record<string, { role: MemberRole; email: string; answers: Record<string, any> }>
-      : undefined;
+    const answersByMember =
+      app.answersByMember && typeof app.answersByMember === "object"
+        ? (app.answersByMember as Record<
+            string,
+            { role: MemberRole; email: string; answers: Record<string, any> }
+          >)
+        : undefined;
 
-    let answersByRole: Record<string, Record<string, any>> = {};
-    if (answersByMember) {
-      const roleOfUser: Record<string, MemberRole> = {};
-      for (const m of members) if (m.userId) roleOfUser[m.userId] = normalizeRole(m.role);
-      for (const [uid, bucket] of Object.entries(answersByMember)) {
-        const role = normalizeRole(roleOfUser[uid] ?? bucket.role);
-        answersByRole[role] = { ...(answersByRole[role] || {}), ...(bucket.answers || {}) };
-      }
-    } else {
-      answersByRole = app.answers || {};
-    }
+    const answersByMemberSections =
+      app.answersByMemberSections && typeof app.answersByMemberSections === "object"
+        ? (Object.fromEntries(
+            Object.entries(app.answersByMemberSections as Record<string, any>).map(
+              ([uid, bucket]) => [
+                uid,
+                {
+                  role: normalizeRole(bucket.role),
+                  email: String(bucket.email || "—"),
+                  sections: bucket.sections || {},
+                } as MemberSectionBucket,
+              ]
+            )
+          ) as Record<string, MemberSectionBucket>)
+        : undefined;
 
     return {
       id: String(app.id ?? app._id ?? ""),
-      status: String(app.status ?? ""),
+      status: String(app.status ?? "submitted") as AppStatus,
       createdAt: app.createdAt || null,
       updatedAt: app.updatedAt || null,
       submittedAt: app.submittedAt || null,
@@ -208,7 +264,7 @@ async function fetchBundle(appId: string, firmId?: string): Promise<ReviewBundle
       },
       members,
       answersByMember,
-      answersByRole,
+      answersByMemberSections,
       timeline: Array.isArray(app.timeline) ? app.timeline : [],
       building: app.building ?? null,
       unit: app.unit ?? null,
@@ -219,7 +275,7 @@ async function fetchBundle(appId: string, firmId?: string): Promise<ReviewBundle
   }
 }
 
-async function fetchUserFirmRole(firmId?: string): Promise<"member" | "admin" | "owner" | "none"> {
+async function fetchUserFirmRole(firmId?: string): Promise<FirmViewerRole> {
   try {
     const url = `/api/landlord/firm/role${firmId ? `?firmId=${encodeURIComponent(firmId)}` : ""}`;
     const res = await fetch(url, { cache: "no-store" });
@@ -234,7 +290,11 @@ async function fetchUserFirmRole(firmId?: string): Promise<"member" | "admin" | 
 }
 
 /* ---------- Actions ---------- */
-async function postDecision(appId: string, action: "preliminary_accept" | "approve" | "reject", firmId?: string) {
+async function postDecision(
+  appId: string,
+  action: "preliminary_accept" | "approve" | "reject",
+  firmId?: string
+) {
   const url = `${API(appId, firmId)}/decision`;
   const res = await fetch(url, {
     method: "POST",
@@ -247,7 +307,9 @@ async function postDecision(appId: string, action: "preliminary_accept" | "appro
 /* ---------- Component ---------- */
 export default function ReviewDesktop({ appId }: { appId?: string }) {
   const routeParams = useParams();
-  const routeId = Array.isArray(routeParams?.id) ? routeParams.id[0] : (routeParams?.id as string | undefined);
+  const routeId = Array.isArray(routeParams?.id)
+    ? routeParams.id[0]
+    : (routeParams?.id as string | undefined);
   const searchParams = useSearchParams();
   const router = useRouter();
 
@@ -262,7 +324,7 @@ export default function ReviewDesktop({ appId }: { appId?: string }) {
   const [viewerRole, setViewerRole] = useState<FirmViewerRole>("none");
   const [isTimelineOpen, setIsTimelineOpen] = useState(false);
 
-  // Lease modal state (unchanged)
+  // Lease modal state
   const [showLeaseModal, setShowLeaseModal] = useState(false);
   const [unitInput, setUnitInput] = useState<string>("");
   const [rentInput, setRentInput] = useState<string>("");
@@ -276,8 +338,6 @@ export default function ReviewDesktop({ appId }: { appId?: string }) {
   const [signed, setSigned] = useState<boolean>(false);
 
   const app = bundle;
-
-  // Ref to focus/scroll the callout after Approve
   const ctaRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -302,22 +362,93 @@ export default function ReviewDesktop({ appId }: { appId?: string }) {
       }
     })();
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [effectiveId, firmId]);
 
+  const answersByMemberSections = app?.answersByMemberSections || {};
+
+  // Derive members, even if API.members is empty, using answersByMemberSections
+  const derivedMembers: Member[] = useMemo(() => {
+    if (!app) return [];
+
+    const seenUserIds = new Set<string>();
+    const seenEmails = new Set<string>();
+    const out: Member[] = [];
+
+    // Start with whatever the API gave us
+    for (const m of app.members || []) {
+      const emailLower = m.email.toLowerCase();
+      if (m.userId) seenUserIds.add(m.userId);
+      seenEmails.add(emailLower);
+      out.push(m);
+    }
+
+    // Add synthetic members from answersByMemberSections if missing
+    for (const [userId, bucket] of Object.entries(answersByMemberSections)) {
+      const emailLower = bucket.email.toLowerCase();
+      const hasUserId = userId && seenUserIds.has(userId);
+      const hasEmail = emailLower && seenEmails.has(emailLower);
+
+      if (!hasUserId && !hasEmail) {
+        out.push({
+          userId,
+          email: bucket.email || "—",
+          role: bucket.role,
+          state: undefined,
+          joinedAt: undefined,
+          name: undefined,
+        });
+        if (userId) seenUserIds.add(userId);
+        if (emailLower) seenEmails.add(emailLower);
+      }
+    }
+
+    return out;
+  }, [app, answersByMemberSections]);
+
   const primary = useMemo(
-    () => app?.members?.find((m) => normalizeRole(m.role) === "primary"),
-    [app]
+    () => derivedMembers.find((m) => normalizeRole(m.role) === "primary"),
+    [derivedMembers]
   );
 
-  const canPrelimByRole = viewerRole === "member" || viewerRole === "admin" || viewerRole === "owner";
+  /* --- Authority gates (role + status) --- */
+  const canPrelimByRole =
+    viewerRole === "member" || viewerRole === "admin" || viewerRole === "owner";
   const canApproveByRole = viewerRole === "admin" || viewerRole === "owner";
-  const canReject = viewerRole !== "none";
+  const canRejectByRole = viewerRole !== "none";
 
-  const isApprovedPendingLease = !!app && app.status === "approved_pending_lease";
+  const prelimStatusOK = app?.status === "submitted";
+
+  // Full approval allowed in submitted or admin_screened
+  const approveStatusOK =
+    app?.status === "submitted" || app?.status === "admin_screened";
+
+  const canPreliminaryAccept = !!app && prelimStatusOK && canPrelimByRole;
+  const canApprove = !!app && approveStatusOK && canApproveByRole;
+  const canReject =
+    !!app &&
+    app.status !== "rejected" &&
+    app.status !== "withdrawn" &&
+    canRejectByRole;
+
+  // New flow: show CTA after approval (approved_high or terms_set)
+  const showConfigureLeaseCTA =
+    !!app && (app.status === "approved_high" || app.status === "terms_set");
 
   async function onDecision(action: "preliminary_accept" | "approve" | "reject") {
     if (!app || !isTruthyId(app.id)) return;
+
+    if (
+      (action === "preliminary_accept" && !canPreliminaryAccept) ||
+      (action === "approve" && !canApprove) ||
+      (action === "reject" && !canReject)
+    ) {
+      setToast("Not authorized for this action,");
+      return;
+    }
+
     const ok = await postDecision(app.id, action, firmId);
     setToast(ok ? "Saved," : "Unauthorized or failed,");
     if (!ok) return;
@@ -326,9 +457,7 @@ export default function ReviewDesktop({ appId }: { appId?: string }) {
     setBundle(b);
 
     if (action === "approve") {
-      // Nudge the user to the Configure Lease CTA (no redirect).
       setToast("Approved — configure the lease next,");
-      // Give state a tick to render callout, then scroll into view.
       setTimeout(() => {
         ctaRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
       }, 150);
@@ -357,7 +486,6 @@ export default function ReviewDesktop({ appId }: { appId?: string }) {
     setShowLeaseModal(true);
   }
 
-
   async function onCreateLease() {
     if (!app) return;
 
@@ -369,9 +497,15 @@ export default function ReviewDesktop({ appId }: { appId?: string }) {
       setToast("Enter a positive monthly rent,");
       return;
     }
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(moveIn)) { setToast("Enter a valid move-in date (YYYY-MM-DD),"); return; }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(moveIn)) {
+      setToast("Enter a valid move-in date (YYYY-MM-DD),");
+      return;
+    }
     const term = termMonths.trim() ? Number(termMonths) : NaN;
-    if (termMonths.trim() && (!Number.isFinite(term) || term <= 0)) { setToast("Lease term must be a positive integer,"); return; }
+    if (termMonths.trim() && (!Number.isFinite(term) || term <= 0)) {
+      setToast("Lease term must be a positive integer,");
+      return;
+    }
 
     const monthlyRentCents = Math.round((Number(rentInput) || 0) * 100);
 
@@ -385,32 +519,53 @@ export default function ReviewDesktop({ appId }: { appId?: string }) {
         country: "US",
       };
 
-      // save app unit & rent
-      const url = `/api/landlord/leases/${encodeURIComponent(app.id)}/unit${firmId ? `?firmId=${encodeURIComponent(firmId)}` : ""}`;
+      const url = `/api/landlord/leases/${encodeURIComponent(
+        app.id
+      )}/unit${firmId ? `?firmId=${encodeURIComponent(firmId)}` : ""}`;
       const body = {
         building,
         unit: { unitNumber: unitInput || null },
-        lease: { monthlyRent: monthlyRentCents, termMonths: termMonths.trim() ? Number(termMonths) : null, moveInDate: moveIn || null },
+        lease: {
+          monthlyRent: monthlyRentCents,
+          termMonths: termMonths.trim() ? Number(termMonths) : null,
+          moveInDate: moveIn || null,
+        },
       };
-      const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => null);
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }).catch(() => null);
       if (!res || !res.ok) {
         let msg = "Failed to save unit/rent on application.";
-        try { const j = await res?.json(); if (j?.error) msg = String(j.error); } catch {}
+        try {
+          const j = await res?.json();
+          if (j?.error) msg = String(j.error);
+        } catch {}
         throw new Error(msg);
       }
 
-      // create assignment
-      const url2 = `/api/landlord/leases/by-app/${encodeURIComponent(app.id)}/assign${firmId ? `?firmId=${encodeURIComponent(firmId)}` : ""}`;
+      const url2 = `/api/landlord/leases/by-app/${encodeURIComponent(
+        app.id
+      )}/assign${firmId ? `?firmId=${encodeURIComponent(firmId)}` : ""}`;
       const res2 = await fetch(url2, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ moveInDate: moveIn, moveOutDate: termMonths.trim() && Number(termMonths) > 0 ? addMonthsISO(moveIn, Number(termMonths)) : null, signed }),
+        body: JSON.stringify({
+          moveInDate: moveIn,
+          moveOutDate:
+            termMonths.trim() && Number(termMonths) > 0
+              ? addMonthsISO(moveIn, Number(termMonths))
+              : null,
+          signed,
+        }),
       }).catch(() => null);
       if (!res2 || !res2.ok) {
         let msg = "Failed to create lease.";
         try {
           const j = await res2?.json();
-          if (j?.error === "overlap") msg = "This unit already has a scheduled/active assignment in that window.";
+          if (j?.error === "overlap")
+            msg = "This unit already has a scheduled/active assignment in that window.";
           else if (j?.error) msg = String(j.error);
         } catch {}
         throw new Error(msg);
@@ -427,7 +582,7 @@ export default function ReviewDesktop({ appId }: { appId?: string }) {
   if (!isTruthyId(effectiveId)) {
     return (
       <div className="rounded-xl border border-amber-200 bg-amber-50 p-6 text-sm text-amber-900">
-        Missing or invalid application id, please navigate from the Applications table again,
+        Missing or invalid application id, please navigate from the Applications list,
       </div>
     );
   }
@@ -447,26 +602,39 @@ export default function ReviewDesktop({ appId }: { appId?: string }) {
     );
   }
 
-  // Prefer role buckets derived from answersByMember; fallback to answersByRole from API
-  const answersByRole = app.answersByMember
-    ? (() => {
-        const byRole: Record<string, Record<string, any>> = {};
-        const roleOfUser: Record<string, MemberRole> = {};
-        for (const m of app.members) {
-          if (m.userId) roleOfUser[m.userId] = normalizeRole(m.role);
-        }
-        for (const [uid, bucket] of Object.entries(app.answersByMember)) {
-          const role = normalizeRole(roleOfUser[uid] ?? bucket.role);
-          byRole[role] = { ...(byRole[role] || {}), ...(bucket.answers || {}) };
-        }
-        return byRole;
-      })()
-    : app.answersByRole || {};
+  const sortedTimeline = [...(app.timeline || [])].sort((a, b) =>
+    (a.at || "").localeCompare(b.at || "")
+  );
 
-  const roles = Object.keys(answersByRole || {});
-  const sortedTimeline = [...(app.timeline || [])].sort((a, b) => (a.at || "").localeCompare(b.at || ""));
+  const hasSectionedAnswers =
+    Object.keys(answersByMemberSections).length > 0;
 
-  const showConfigureLeaseCTA = app.status === "approved_pending_lease" /* || app.status === "approved_pending_payment" */;
+  // Sort members for display: primary → co-applicants → cosigners
+  const sortedMembers: Member[] = [...derivedMembers].sort((a, b) => {
+    const rank = (r: MemberRole) =>
+      normalizeRole(r) === "primary"
+        ? 0
+        : normalizeRole(r) === "co-applicant"
+        ? 1
+        : 2;
+    const ra = rank(a.role);
+    const rb = rank(b.role);
+    if (ra !== rb) return ra - rb;
+    return (a.name || a.email).localeCompare(b.name || b.email);
+  });
+
+  // Lookup sectioned answers bucket for a member
+  function getMemberSections(member: Member): MemberSectionBucket | null {
+    if (member.userId && answersByMemberSections[member.userId]) {
+      return answersByMemberSections[member.userId];
+    }
+    const found = Object.values(answersByMemberSections).find(
+      (bucket) =>
+        bucket.email &&
+        bucket.email.toLowerCase() === member.email.toLowerCase()
+    );
+    return found || null;
+  }
 
   return (
     <main className="space-y-6">
@@ -476,14 +644,13 @@ export default function ReviewDesktop({ appId }: { appId?: string }) {
           <div className="min-w-0">
             <div className="text-sm font-medium text-gray-500">Application</div>
             <div className="mt-0.5 text-xl font-semibold text-gray-900 truncate">
-              {(app.members.find(m => normalizeRole(m.role) === "primary")?.name) ||
-                (app.members.find(m => normalizeRole(m.role) === "primary")?.email) ||
-                "Primary applicant"}{" "}
+              {primary?.name || primary?.email || "Primary applicant"}{" "}
               <span className="text-gray-400 font-normal">/</span>{" "}
               <span className="text-gray-700">{app.form.name}</span>
             </div>
             <div className="mt-1 text-xs text-gray-500">
-              Created <LocalTime iso={app.createdAt} tz={firmTz} />, updated <LocalTime iso={app.updatedAt} tz={firmTz} />, submitted{" "}
+              Created <LocalTime iso={app.createdAt} tz={firmTz} />, updated{" "}
+              <LocalTime iso={app.updatedAt} tz={firmTz} />, submitted{" "}
               <LocalTime iso={app.submittedAt} tz={firmTz} />
             </div>
             <div className="mt-1 text-xs text-gray-500">
@@ -493,102 +660,189 @@ export default function ReviewDesktop({ appId }: { appId?: string }) {
 
           {/* Actions */}
           <div className="flex items-center gap-2 relative">
-            <StatusChip status={app.status} />
+            <StatusChip status={app.status as AppStatus} />
             <Link
-              href={`/landlord/applications${firmId ? `?firmId=${encodeURIComponent(firmId)}` : ""}`}
+              href={`/landlord/applications${
+                firmId ? `?firmId=${encodeURIComponent(firmId)}` : ""
+              }`}
               className="ml-3 rounded-md border border-gray-300 bg-white px-3 py-2 text-xs font-medium text-gray-900 hover:bg-gray-50"
             >
               Back to applications
             </Link>
-
           </div>
         </div>
 
-        {/* Clear CTA: Configure lease (no auto-redirect) */}
+        {/* Configure lease CTA after approval */}
         {showConfigureLeaseCTA && (
-          <div ref={ctaRef} className="mt-4 rounded-xl border border-blue-300 bg-blue-50/80 p-4">
+          <div
+            ref={ctaRef}
+            className="mt-4 rounded-xl border border-blue-300 bg-blue-50/80 p-4"
+          >
             <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
               <div>
-                <div className="text-sm font-semibold text-blue-900">Configure lease</div>
+                <div className="text-sm font-semibold text-blue-900">
+                  Configure lease
+                </div>
                 <p className="mt-0.5 text-sm text-blue-900/80">
-                  This application is <span className="font-medium">approved</span> and waiting for lease setup.
-                  Set monthly rent, term, start date, security deposit, and key fee. You can collect a holding or minimum after.
+                  This application is <span className="font-medium">approved</span> and waiting for
+                  lease setup. Set monthly rent, term, start date, security deposit, and key fee, then
+                  collect a minimum payment.
                 </p>
               </div>
               <div className="flex gap-2">
-				<button
-				  onClick={() =>
-					router.push(
-					  `/landlord/leases/${encodeURIComponent(app.id)}/setup${
-						firmId ? `?firmId=${encodeURIComponent(firmId)}` : ""
-					  }`
-					)
-				  }
-				  className="rounded-md bg-blue-600 px-3 py-2 text-xs font-medium text-white hover:bg-blue-700"
-				>
-				  Configure lease
-				</button>
+                <button
+                  onClick={() =>
+                    router.push(
+                      `/landlord/leases/${encodeURIComponent(
+                        app.id
+                      )}/setup${firmId ? `?firmId=${encodeURIComponent(firmId)}` : ""}`
+                    )
+                  }
+                  className="rounded-md bg-blue-600 px-3 py-2 text-xs font-medium text-white hover:bg-blue-700"
+                >
+                  Configure lease
+                </button>
               </div>
             </div>
           </div>
         )}
 
-        {/* Decisions */}
-        <div className="mt-4 flex flex-wrap gap-2">
-          {viewerRole !== "none" && app.status !== "approved_pending_lease" && (
-            <>
-              {(canPrelimByRole && app.status !== "needs_approval") && (
+        {/* Decisions (role + status gated) */}
+        <div className="mt-4">
+          {(canPreliminaryAccept || canApprove || canReject) && (
+            <div className="flex flex-wrap items-center gap-2">
+              {/* Preliminary accept */}
+              {canPreliminaryAccept && (
                 <button
                   onClick={() => onDecision("preliminary_accept")}
-                  className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-900 hover:bg-amber-100"
+                  className={clsx(
+                    "group inline-flex items-center gap-1.5 rounded-md",
+                    "border border-amber-300 bg-amber-50 px-3 py-1.5 text-[11px] font-medium text-amber-900",
+                    "hover:bg-amber-100 active:scale-[0.99] transition focus:outline-none focus:ring-2 focus:ring-amber-300/60"
+                  )}
+                  title="Preliminary accept"
+                  aria-label="Preliminary accept"
                 >
-                  Preliminary accept
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    className="text-amber-700"
+                    aria-hidden="true"
+                  >
+                    <path
+                      d="M20 6L9 17l-5-5"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                  Prelim accept
                 </button>
               )}
-              {canApproveByRole && (
+
+              {/* Fully accept */}
+              {canApprove && (
                 <button
                   onClick={() => onDecision("approve")}
-                  className="rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-900 hover:bg-emerald-100"
+                  className={clsx(
+                    "group inline-flex items-center gap-1.5 rounded-md",
+                    "border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-[11px] font-medium text-emerald-900",
+                    "hover:bg-emerald-100 active:scale-[0.99] transition focus:outline-none focus:ring-2 focus:ring-emerald-300/60"
+                  )}
+                  title="Fully accept"
+                  aria-label="Fully accept"
                 >
-                  Fully accept
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    className="text-emerald-700"
+                    aria-hidden="true"
+                  >
+                    <path
+                      d="M12 20V10m0 0l-3 3m3-3l3 3M5 20h14a2 2 0 0 0 2-2V9.5a2 2 0 0 0-.586-1.414l-4-4A2 2 0 0 0 14.172 3H8A3 3 0 0 0 5 6v14Z"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                  Approve
                 </button>
               )}
+
+              {/* Reject */}
               {canReject && (
                 <button
                   onClick={() => onDecision("reject")}
-                  className="rounded-md border border-rose-300 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-900 hover:bg-rose-100"
+                  className={clsx(
+                    "group inline-flex items-center gap-1.5 rounded-md",
+                    "border border-rose-300 bg-rose-50 px-3 py-1.5 text-[11px] font-medium text-rose-900",
+                    "hover:bg-rose-100 active:scale-[0.99] transition focus:outline-none focus:ring-2 focus:ring-rose-300/60"
+                  )}
+                  title="Reject"
+                  aria-label="Reject"
                 >
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    className="text-rose-700"
+                    aria-hidden="true"
+                  >
+                    <path
+                      d="M6 6l12 12M18 6L6 18"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
                   Reject
                 </button>
               )}
-            </>
+            </div>
           )}
         </div>
       </div>
 
-
-      {/* Lease modal (unchanged UI) */}
+      {/* Lease modal */}
       {showLeaseModal && (
         <div className="fixed inset-0 z-50">
-          <div className="absolute inset-0 bg-black/30" onClick={() => setShowLeaseModal(false)} />
+          <div
+            className="absolute inset-0 bg-black/30"
+            onClick={() => setShowLeaseModal(false)}
+          />
           <div className="absolute left-1/2 top-16 w-[92%] max-w-lg -translate-x-1/2 rounded-2xl bg-white shadow-xl ring-1 ring-gray-200">
             <div className="flex items-center justify-between border-b border-gray-100 px-5 py-3">
-              <h3 className="text-sm font-semibold text-gray-900">Confirm lease details</h3>
-              <button onClick={() => setShowLeaseModal(false)} className="rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:bg-gray-50">
+              <h3 className="text-sm font-semibold text-gray-900">
+                Confirm lease details
+              </h3>
+              <button
+                onClick={() => setShowLeaseModal(false)}
+                className="rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:bg-gray-50"
+              >
                 Close
               </button>
             </div>
 
             <div className="px-5 py-4 space-y-4 text-sm">
-              {/* address/unit/rent fields unchanged for brevity */}
-              {/* … keep your existing inputs here … */}
               <p className="text-[11px] text-gray-500">
-                We’ll save address, unit and monthly rent to this application, then create a simple assignment (unit, dates, signed flag).
+                We’ll save address, unit and monthly rent to this application, then create a
+                simple assignment (unit, dates, signed flag).
               </p>
             </div>
 
             <div className="flex justify-end gap-2 border-t border-gray-100 px-5 py-3">
-              <button onClick={onCreateLease} className="rounded-md bg-emerald-600 px-3 py-2 text-xs font-medium text-white hover:bg-emerald-700">
+              <button
+                onClick={onCreateLease}
+                className="rounded-md bg-emerald-600 px-3 py-2 text-xs font-medium text-white hover:bg-emerald-700"
+              >
                 Save lease
               </button>
             </div>
@@ -598,38 +852,121 @@ export default function ReviewDesktop({ appId }: { appId?: string }) {
 
       {/* 2-column layout */}
       <div className="grid grid-cols-12 gap-6">
-        {/* Left: Answers */}
+        {/* Left: Answers (member + sections) */}
         <section className="col-span-12 lg:col-span-8 space-y-6">
-          {Object.keys(answersByRole || {}).length === 0 ? (
+          {!hasSectionedAnswers ? (
             <div className="rounded-xl border border-gray-200 bg-white p-5 text-sm text-gray-600">
               No answers yet,
             </div>
           ) : (
-            Object.keys(answersByRole).map((roleKey) => {
-              const roleAnswers = answersByRole[roleKey] || {};
-              const norm = normalizeRole(roleKey);
-              const roleLabel =
-                norm === "primary" ? "Primary applicant" :
-                norm === "cosigner" ? "Cosigner" : "Co-applicant";
+            sortedMembers.map((m) => {
+              const bucket = getMemberSections(m);
+              const sections = bucket?.sections || {};
+
+              const sectionTitlesFromForm = app.form.sections
+                .map((s) => s.title)
+                .filter((t) => sections[t]);
+
+              const extraSectionTitles = Object.keys(sections).filter(
+                (t) => !sectionTitlesFromForm.includes(t)
+              );
+
+              const allSectionTitles = [...sectionTitlesFromForm, ...extraSectionTitles];
+
+              const totalAnswers = Object.values(sections).reduce(
+                (sum, sec) => sum + Object.keys(sec || {}).length,
+                0
+              );
+
               return (
-                <div key={roleKey} className="rounded-xl border border-gray-200 bg-white">
+                <div
+                  key={m.userId || m.email}
+                  className="rounded-xl border border-gray-200 bg-white"
+                >
                   <div className="flex items-center justify-between border-b border-gray-100 px-5 py-3">
-                    <div className="text-sm font-semibold text-gray-900">{roleLabel}</div>
-                    <Badge tone="gray">{Object.keys(roleAnswers).length} answers</Badge>
-                  </div>
-                  <div className="p-5">
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      {Object.entries(roleAnswers).map(([k, v]) => (
-                        <div key={k} className="rounded-md border border-gray-200 p-3">
-                          <div className="text-[11px] uppercase tracking-wide text-gray-500">
-                            {labelize(k)}
-                          </div>
-                          <div className="mt-1 text-sm text-gray-900 break-words">
-                            {String(v ?? "—")}
-                          </div>
-                        </div>
-                      ))}
+                    <div className="min-w-0">
+                      <div className="text-sm font-semibold text-gray-900 truncate">
+                        {m.name || m.email}
+                      </div>
+                      <div className="mt-1 flex flex-wrap items-center gap-1 text-xs text-gray-600">
+                        <Badge
+                          tone={
+                            normalizeRole(m.role) === "primary"
+                              ? "blue"
+                              : normalizeRole(m.role) === "cosigner"
+                              ? "violet"
+                              : "gray"
+                          }
+                        >
+                          {String(m.role).replace("_", "-")}
+                        </Badge>
+                        {m.state && (
+                          <Badge
+                            tone={
+                              m.state === "complete"
+                                ? "emerald"
+                                : m.state === "missing_docs"
+                                ? "amber"
+                                : "gray"
+                            }
+                          >
+                            {m.state.replace("_", " ")}
+                          </Badge>
+                        )}
+                        <span className="text-gray-400">·</span>
+                        <span>{totalAnswers} answers</span>
+                      </div>
                     </div>
+                  </div>
+
+                  <div className="p-5 space-y-5">
+                    {allSectionTitles.length === 0 ? (
+                      <div className="text-sm text-gray-600">
+                        No answers for this member yet,
+                      </div>
+                    ) : (
+                      allSectionTitles.map((sectionTitle) => {
+                        const qa = sections[sectionTitle] || {};
+                        const entries = Object.entries(qa);
+
+                        if (!entries.length) return null;
+
+                        return (
+                          <div
+                            key={sectionTitle}
+                            className="rounded-lg border border-gray-100 bg-gray-50/60"
+                          >
+                            <div className="flex items-center justify-between border-b border-gray-100 px-4 py-2.5">
+                              <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                                {sectionTitle}
+                              </div>
+                              <Badge tone="gray">{entries.length}</Badge>
+                            </div>
+                            <div className="px-4 py-3">
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                {entries.map(([label, value]) => (
+                                  <div
+                                    key={label}
+                                    className="rounded-md border border-gray-200 bg-white p-3"
+                                  >
+                                    <div className="text-[11px] uppercase tracking-wide text-gray-500">
+                                      {label}
+                                    </div>
+                                    <div className="mt-1 text-sm text-gray-900 break-words whitespace-pre-wrap">
+                                      {value === null ||
+                                      value === undefined ||
+                                      value === ""
+                                        ? "—"
+                                        : String(value)}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
                   </div>
                 </div>
               );
@@ -642,20 +979,43 @@ export default function ReviewDesktop({ appId }: { appId?: string }) {
           {/* Members */}
           <div className="rounded-xl border border-gray-200 bg-white">
             <div className="flex items-center justify-between border-b border-gray-100 px-5 py-3">
-              <div className="text-sm font-semibold text-gray-900">Household members</div>
-              <Badge tone="gray">{app.members.length}</Badge>
+              <div className="text-sm font-semibold text-gray-900">
+                Household members
+              </div>
+              <Badge tone="gray">{derivedMembers.length}</Badge>
             </div>
             <div className="p-5 space-y-3">
-              {app.members.map((m, i) => (
-                <div key={i} className="flex items-start justify-between rounded-md border border-gray-200 p-3">
+              {derivedMembers.map((m, i) => (
+                <div
+                  key={i}
+                  className="flex items-start justify-between rounded-md border border-gray-200 p-3"
+                >
                   <div className="min-w-0">
-                    <div className="text-sm font-medium text-gray-900 truncate">{m.name || m.email}</div>
+                    <div className="text-sm font-medium text-gray-900 truncate">
+                      {m.name || m.email}
+                    </div>
                     <div className="mt-1 flex flex-wrap items-center gap-1">
-                      <Badge tone={normalizeRole(m.role) === "primary" ? "blue" : normalizeRole(m.role) === "cosigner" ? "violet" : "gray"}>
+                      <Badge
+                        tone={
+                          normalizeRole(m.role) === "primary"
+                            ? "blue"
+                            : normalizeRole(m.role) === "cosigner"
+                            ? "violet"
+                            : "gray"
+                        }
+                      >
                         {String(m.role).replace("_", "-")}
                       </Badge>
                       {m.state && (
-                        <Badge tone={m.state === "complete" ? "emerald" : m.state === "missing_docs" ? "amber" : "gray"}>
+                        <Badge
+                          tone={
+                            m.state === "complete"
+                              ? "emerald"
+                              : m.state === "missing_docs"
+                              ? "amber"
+                              : "gray"
+                          }
+                        >
                           {m.state.replace("_", " ")}
                         </Badge>
                       )}
@@ -666,18 +1026,10 @@ export default function ReviewDesktop({ appId }: { appId?: string }) {
                       </div>
                     )}
                   </div>
-                  <div className="shrink-0 flex gap-2">
-                    <button className="rounded-md border border-gray-300 bg-white px-2.5 py-1.5 text-xs hover:bg-gray-50">
-                      Resend invite
-                    </button>
-                    <button className="rounded-md border border-gray-300 bg-white px-2.5 py-1.5 text-xs hover:bg-gray-50">
-                      Request docs
-                    </button>
-                  </div>
                 </div>
               ))}
               <p className="text-xs text-gray-500">
-                Multi-member households are supported, primary, co-applicants, cosigners,
+                Multi-member households are supported — primary, co-applicants, cosigners,
               </p>
             </div>
           </div>
@@ -685,7 +1037,9 @@ export default function ReviewDesktop({ appId }: { appId?: string }) {
           {/* Qualifications */}
           <div className="rounded-xl border border-gray-200 bg-white">
             <div className="flex items-center justify-between border-b border-gray-100 px-5 py-3">
-              <div className="text-sm font-semibold text-gray-900">Required qualifications</div>
+              <div className="text-sm font-semibold text-gray-900">
+                Required qualifications
+              </div>
               <Badge tone="gray">{app.form.qualifications.length}</Badge>
             </div>
             <div className="p-5 space-y-2">
@@ -693,7 +1047,10 @@ export default function ReviewDesktop({ appId }: { appId?: string }) {
                 <div className="text-sm text-gray-600">None configured yet,</div>
               ) : (
                 app.form.qualifications.map((q) => (
-                  <div key={q.id} className="rounded-md border border-gray-200 p-3">
+                  <div
+                    key={q.id}
+                    className="rounded-md border border-gray-200 p-3"
+                  >
                     <div className="flex items-center justify-between">
                       <div className="font-medium text-gray-900">{q.title}</div>
                       <Badge tone={q.requirement === "required" ? "amber" : "gray"}>
@@ -701,7 +1058,10 @@ export default function ReviewDesktop({ appId }: { appId?: string }) {
                       </Badge>
                     </div>
                     <div className="mt-1 text-xs text-gray-600">
-                      Audience: {q.audience.map(a => String(a).replace("_", "-")).join(", ")}
+                      Audience:{" "}
+                      {q.audience
+                        .map((a) => String(a).replace("_", "-"))
+                        .join(", ")}
                     </div>
                   </div>
                 ))
@@ -709,7 +1069,7 @@ export default function ReviewDesktop({ appId }: { appId?: string }) {
             </div>
           </div>
 
-          {/* Timeline (collapsible, starts collapsed) */}
+          {/* Timeline (collapsible) */}
           <div className="rounded-xl border border-gray-200 bg-white">
             <button
               type="button"
@@ -718,11 +1078,16 @@ export default function ReviewDesktop({ appId }: { appId?: string }) {
               className="flex w-full items-center justify-between border-b border-gray-100 px-5 py-3 text-left"
             >
               <div className="flex items-center gap-2">
-                <div className="text-sm font-semibold text-gray-900">Timeline</div>
+                <div className="text-sm font-semibold text-gray-900">
+                  Timeline
+                </div>
                 <Badge tone="gray">{sortedTimeline.length}</Badge>
               </div>
               <svg
-                className={clsx("h-4 w-4 shrink-0 text-gray-500 transition-transform", isTimelineOpen && "rotate-180")}
+                className={clsx(
+                  "h-4 w-4 shrink-0 text-gray-500 transition-transform",
+                  isTimelineOpen && "rotate-180"
+                )}
                 viewBox="0 0 20 20"
                 fill="currentColor"
                 aria-hidden="true"
@@ -746,7 +1111,12 @@ export default function ReviewDesktop({ appId }: { appId?: string }) {
                       <div>
                         <div className="text-sm text-gray-900">
                           {ev.event.replace(".", " · ")}
-                          {ev.meta?.to && <span className="text-gray-500"> → {String(ev.meta.to).replace("_", " ")}</span>}
+                          {ev.meta?.to && (
+                            <span className="text-gray-500">
+                              {" "}
+                              → {String(ev.meta.to).replace("_", " ")}
+                            </span>
+                          )}
                         </div>
                         <div className="text-xs text-gray-500">
                           <LocalTime iso={ev.at} tz={firmTz} />

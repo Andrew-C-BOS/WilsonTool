@@ -42,6 +42,13 @@ function pickUserId(user: unknown): string {
   );
 }
 
+export async function POST() {
+  return NextResponse.json(
+    { ok: false, error: "deprecated_endpoint" },
+    { status: 410 } // Gone
+  );
+}
+
 export async function POST(
   req: NextRequest,
   ctx: { params: { id: string } } | { params: Promise<{ id: string }> }
