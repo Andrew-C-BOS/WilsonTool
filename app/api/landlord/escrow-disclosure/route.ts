@@ -11,7 +11,10 @@ export const dynamic = "force-dynamic";
 /** Debug helper — logs only when ?debug=1 */
 function logDebug(debug: boolean, label: string, data?: any) {
   if (debug) {
-    console.log(`[escrow-disclosure] ${label}`, JSON.stringify(data, null, 2));
+    console.log(
+      `[escrow-disclosure] ${label}`,
+      JSON.stringify(data, null, 2)
+    );
   }
 }
 
@@ -37,7 +40,7 @@ function toHundredths(raw: any): number | undefined {
   }
   return Math.round(n * 100);
 }
-/** Validate full account number length – allow 5..34 digits (covers most bank formats incl. IBAN core lengths of digits) */
+/** Validate full account number length – allow 5..34 digits */
 function isPlausibleAcctLength(d: string): boolean {
   const len = d.length;
   return len >= 5 && len <= 34;
@@ -56,7 +59,10 @@ export async function GET(req: Request) {
     debugTrace.user = user;
     if (!user) {
       logDebug(debug, "no_user");
-      return NextResponse.json({ ok: false, error: "not_authenticated", debugTrace }, { status: 401 });
+      return NextResponse.json(
+        { ok: false, error: "not_authenticated", debugTrace },
+        { status: 401 }
+      );
     }
 
     let firmCtx: { firmId: string; role: string };
@@ -66,33 +72,47 @@ export async function GET(req: Request) {
     } catch (e: any) {
       logDebug(debug, "resolve_failed", e);
       return NextResponse.json(
-        { ok: false, error: e?.message || "resolve_firm_failed", ...(e?.data && { details: e.data }), debugTrace },
+        {
+          ok: false,
+          error: e?.message || "resolve_firm_failed",
+          ...(e?.data && { details: e.data }),
+          debugTrace,
+        },
         { status: e?.status ?? 400 }
       );
     }
 
     const db = await getDb();
-    const firms = db.collection("firms");
-    const filter = ObjectId.isValid(firmCtx.firmId)
+    const firms = db.collection<any>("firms");
+    const filter: { _id: any } = ObjectId.isValid(firmCtx.firmId)
       ? { _id: new ObjectId(firmCtx.firmId) }
       : { _id: firmCtx.firmId };
 
     logDebug(debug, "mongo_filter", filter);
 
-    const doc = await firms.findOne(filter, { projection: { escrowDisclosure: 1 } });
+    const doc = await firms.findOne(filter, {
+      projection: { escrowDisclosure: 1 },
+    });
     debugTrace.mongoDoc = doc;
 
     if (!doc?.escrowDisclosure) {
       logDebug(debug, "no_disclosure");
       // 200 with explicit "empty" so UI can render blank form
-      return NextResponse.json({ ok: true, empty: true, disclosure: null, debugTrace });
+      return NextResponse.json({
+        ok: true,
+        empty: true,
+        disclosure: null,
+        debugTrace,
+      });
     }
 
     // Normalize legacy → new shape for response
     const d = doc.escrowDisclosure || {};
     const normalized = {
       bankName: String(d.bankName ?? ""),
-      accountType: String(d.accountType ?? "Interest-bearing escrow"),
+      accountType: String(
+        d.accountType ?? "Interest-bearing escrow"
+      ),
       accountIdentifier: onlyDigits(d.accountIdentifier ?? ""), // may be ""
       accountLast4: last4(d.accountIdentifier ?? d.accountLast4 ?? ""),
       bankAddress: String(d.bankAddress ?? ""),
@@ -104,11 +124,20 @@ export async function GET(req: Request) {
     };
 
     logDebug(debug, "success", normalized);
-    return NextResponse.json({ ok: true, disclosure: normalized, debugTrace });
+    return NextResponse.json({
+      ok: true,
+      disclosure: normalized,
+      debugTrace,
+    });
   } catch (err: any) {
     logDebug(true, "unhandled", err);
     return NextResponse.json(
-      { ok: false, error: "unhandled_error", message: err?.message || "unknown", stack: err?.stack },
+      {
+        ok: false,
+        error: "unhandled_error",
+        message: err?.message || "unknown",
+        stack: err?.stack,
+      },
       { status: 500 }
     );
   }
@@ -138,7 +167,10 @@ export async function POST(req: Request) {
     debugTrace.user = user;
     if (!user) {
       logDebug(debug, "no_user");
-      return NextResponse.json({ ok: false, error: "not_authenticated", debugTrace }, { status: 401 });
+      return NextResponse.json(
+        { ok: false, error: "not_authenticated", debugTrace },
+        { status: 401 }
+      );
     }
 
     let firmCtx: { firmId: string; role: string };
@@ -148,7 +180,12 @@ export async function POST(req: Request) {
     } catch (e: any) {
       logDebug(debug, "resolve_failed", e);
       return NextResponse.json(
-        { ok: false, error: e?.message || "resolve_firm_failed", ...(e?.data && { details: e.data }), debugTrace },
+        {
+          ok: false,
+          error: e?.message || "resolve_firm_failed",
+          ...(e?.data && { details: e.data }),
+          debugTrace,
+        },
         { status: e?.status ?? 400 }
       );
     }
@@ -158,7 +195,9 @@ export async function POST(req: Request) {
 
     // Prefer full account number; accept legacy last4 only (but warn)
     const rawFull = onlyDigits(body.accountIdentifier);
-    const derivedLast4 = last4(rawFull || body.accountLast4 || "");
+    const derivedLast4 = last4(
+      rawFull || body.accountLast4 || ""
+    );
 
     const interestHundredths =
       body.interestHundredths !== undefined
@@ -171,69 +210,122 @@ export async function POST(req: Request) {
       accountIdentifier: rawFull, // store full digits (consider encrypting at-rest in your lib/db layer)
       accountLast4: derivedLast4, // convenience, redundant but handy for quick UI
       bankAddress: String(body.bankAddress || "").trim(),
-      interestHundredths: interestHundredths === undefined ? undefined : Number(interestHundredths),
+      interestHundredths:
+        interestHundredths === undefined
+          ? undefined
+          : Number(interestHundredths),
     };
     debugTrace.parsedDisclosure = disclosure;
 
     // Validation
     if (!disclosure.bankName) {
-      return NextResponse.json({ ok: false, error: "bankName_required", debugTrace }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "bankName_required", debugTrace },
+        { status: 400 }
+      );
     }
     if (!disclosure.accountType) {
-      return NextResponse.json({ ok: false, error: "accountType_required", debugTrace }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "accountType_required", debugTrace },
+        { status: 400 }
+      );
     }
     if (!disclosure.bankAddress) {
-      return NextResponse.json({ ok: false, error: "bankAddress_required", debugTrace }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "bankAddress_required", debugTrace },
+        { status: 400 }
+      );
     }
 
     // Require full account number; allow legacy last4-only, but flag with specific error
     if (!disclosure.accountIdentifier) {
-      return NextResponse.json({ ok: false, error: "accountIdentifier_required_full_digits", debugTrace }, { status: 400 });
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "accountIdentifier_required_full_digits",
+          debugTrace,
+        },
+        { status: 400 }
+      );
     }
-    if (!isPlausibleAcctLength(disclosure.accountIdentifier)) {
-      return NextResponse.json({ ok: false, error: "accountIdentifier_invalid_length", debugTrace }, { status: 400 });
+    if (
+      !isPlausibleAcctLength(disclosure.accountIdentifier)
+    ) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "accountIdentifier_invalid_length",
+          debugTrace,
+        },
+        { status: 400 }
+      );
     }
     if (!/^\d{4}$/.test(disclosure.accountLast4)) {
-      return NextResponse.json({ ok: false, error: "accountLast4_invalid", debugTrace }, { status: 400 });
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "accountLast4_invalid",
+          debugTrace,
+        },
+        { status: 400 }
+      );
     }
 
     if (disclosure.interestHundredths !== undefined) {
       const n = Number(disclosure.interestHundredths);
       if (!Number.isInteger(n) || n < 0 || n > 5000) {
         // Keep range sane (0.00%..50.00%); adjust if needed
-        return NextResponse.json({ ok: false, error: "interestHundredths_out_of_range", debugTrace }, { status: 400 });
+        return NextResponse.json(
+          {
+            ok: false,
+            error: "interestHundredths_out_of_range",
+            debugTrace,
+          },
+          { status: 400 }
+        );
       }
     }
 
     const db = await getDb();
-    const firms = db.collection("firms");
-    const filter = ObjectId.isValid(firmCtx.firmId)
+    const firms = db.collection<any>("firms");
+    const filter: { _id: any } = ObjectId.isValid(
+      firmCtx.firmId
+    )
       ? { _id: new ObjectId(firmCtx.firmId) }
       : { _id: firmCtx.firmId };
 
     logDebug(debug, "mongo_filter", filter);
 
-    // Persist in a forward-compatible, normalized shape
+    // Persist normalized shape
     const toSave = {
       bankName: disclosure.bankName,
       accountType: disclosure.accountType,
-      accountIdentifier: disclosure.accountIdentifier, // consider encrypting in your db layer
+      accountIdentifier: disclosure.accountIdentifier,
       accountLast4: disclosure.accountLast4,
       bankAddress: disclosure.bankAddress,
       interestHundredths: disclosure.interestHundredths,
-      // Keep legacy mirror fields minimal for any old readers (optional):
-      // interestRate: disclosure.interestHundredths !== undefined ? disclosure.interestHundredths / 100 : undefined,
     };
 
-    await firms.updateOne(filter, { $set: { escrowDisclosure: toSave, updatedAt: new Date() } });
+    await firms.updateOne(filter, {
+      $set: { escrowDisclosure: toSave, updatedAt: new Date() },
+    });
 
     logDebug(debug, "update_success");
     // Echo normalized disclosure so the UI updates immediately
-    return NextResponse.json({ ok: true, disclosure: toSave, debugTrace });
+    return NextResponse.json({
+      ok: true,
+      disclosure: toSave,
+      debugTrace,
+    });
   } catch (err: any) {
     logDebug(true, "unhandled", err);
     return NextResponse.json(
-      { ok: false, error: "unhandled_error", message: err?.message || "unknown", stack: err?.stack },
+      {
+        ok: false,
+        error: "unhandled_error",
+        message: err?.message || "unknown",
+        stack: err?.stack,
+      },
       { status: 500 }
     );
   }

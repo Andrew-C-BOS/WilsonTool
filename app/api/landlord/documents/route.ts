@@ -36,7 +36,10 @@ function toStr(v: any): string {
   }
 }
 
-async function resolveFirmForUser(req: NextRequest, user: { _id: any }): Promise<FirmMeta> {
+async function resolveFirmForUser(
+  req: NextRequest,
+  user: { _id: any }
+): Promise<FirmMeta> {
   const db = await getDb();
   const firmIdParam = req.nextUrl.searchParams.get("firmId") ?? undefined;
 
@@ -45,13 +48,17 @@ async function resolveFirmForUser(req: NextRequest, user: { _id: any }): Promise
   const userIdCandidates = (() => {
     const out: any[] = [];
     if (user?._id != null) out.push(user._id);
-    const asOid = ObjectId.isValid(String(user?._id)) ? new ObjectId(String(user._id)) : null;
+    const asOid = ObjectId.isValid(String(user?._id))
+      ? new ObjectId(String(user._id))
+      : null;
     if (asOid) out.push(asOid);
     if (user?._id instanceof ObjectId) out.push(String(user._id));
     return Array.from(new Set(out.map(String))).map((s) =>
       ObjectId.isValid(s) ? new ObjectId(s) : s
     );
   })();
+
+  const firms = db.collection<any>("FirmDoc");
 
   // If firmId is explicitly provided, verify membership
   if (firmIdParam) {
@@ -65,14 +72,13 @@ async function resolveFirmForUser(req: NextRequest, user: { _id: any }): Promise
       throw new Error("not_in_firm");
     }
 
-    const firm = await db
-      .collection("FirmDoc")
-      .findOne(
-        ObjectId.isValid(firmIdParam)
-          ? { _id: new ObjectId(firmIdParam) }
-          : { _id: firmIdParam },
-        { projection: { _id: 1, name: 1, slug: 1 } }
-      );
+    const firmFilter: { _id: any } = ObjectId.isValid(firmIdParam)
+      ? { _id: new ObjectId(firmIdParam) }
+      : { _id: firmIdParam };
+
+    const firm = await firms.findOne(firmFilter, {
+      projection: { _id: 1, name: 1, slug: 1 },
+    });
     if (!firm) throw new Error("invalid_firmId");
     return {
       firmId: toStr(firm._id),
@@ -84,7 +90,10 @@ async function resolveFirmForUser(req: NextRequest, user: { _id: any }): Promise
   // Otherwise, infer from memberships
   const memberships = await db
     .collection("firm_memberships")
-    .find({ userId: { $in: userIdCandidates }, active: true }, { projection: { firmId: 1 } })
+    .find(
+      { userId: { $in: userIdCandidates }, active: true },
+      { projection: { firmId: 1 } }
+    )
     .limit(5)
     .toArray();
 
@@ -94,14 +103,13 @@ async function resolveFirmForUser(req: NextRequest, user: { _id: any }): Promise
   }
 
   const firmId = memberships[0].firmId;
-  const firm = await db
-    .collection("FirmDoc")
-    .findOne(
-      ObjectId.isValid(String(firmId))
-        ? { _id: new ObjectId(String(firmId)) }
-        : { _id: String(firmId) },
-      { projection: { _id: 1, name: 1, slug: 1 } }
-    );
+  const firmFilter2: { _id: any } = ObjectId.isValid(String(firmId))
+    ? { _id: new ObjectId(String(firmId)) }
+    : { _id: String(firmId) };
+
+  const firm = await firms.findOne(firmFilter2, {
+    projection: { _id: 1, name: 1, slug: 1 },
+  });
   if (!firm) throw new Error("invalid_membership");
 
   return {
@@ -127,7 +135,7 @@ export async function GET(req: NextRequest) {
 
   try {
     const db = await getDb();
-    const firm = await resolveFirmForUser(req, user);
+    const firm = await resolveFirmForUser(req, user as any);
 
     const docs = (await db
       .collection<LandlordDocument>("landlord_documents")

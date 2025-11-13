@@ -196,8 +196,6 @@ export const AllowedActions: Record<AppState, Action[]> = {
    Optional: derive countersign rules from your plan
    (call this when you "set terms")
 ───────────────────────────────────────────────────────────── */
-export type MinRule = { bucket: MoneyBucket; minCents: number };
-
 export function deriveMinRulesFromPlan(plan: {
   countersignUpfrontThresholdCents?: number | null;
   countersignDepositThresholdCents?: number | null;

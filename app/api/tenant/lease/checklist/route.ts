@@ -72,8 +72,9 @@ export async function PATCH(req: Request) {
     const colB = db.collection("unit_leases");  // where your data lives
 
     // 1) Find the active household for this user (userId stored as string)
-    const userIdStr = String((user as any)._id ?? user?.id ?? "");
-    const hm = await memberships.findOne({ userId: userIdStr, active: true });
+    const u: any = user;
+	const userIdStr = String(u._id ?? u.id ?? "");
+	const hm = await memberships.findOne({ userId: userIdStr, active: true });
     if (!hm) {
       return NextResponse.json({ ok: false, error: "no_household" }, { status: 404 });
     }
@@ -147,20 +148,20 @@ export async function PATCH(req: Request) {
       dueAt ??
       (parseDateOnly(target.moveInDate)?.toISOString() ?? startOfTodayLocal().toISOString());
 
-    const pushRes = await col.updateOne(
-      { _id: target._id },
-      {
-        $push: {
-          checklist: {
-            key,
-            label: fallbackLabel,
-            dueAt: fallbackDueAt,
-            completedAt: done ? nowISO : null,
-            notes: null,
-          },
-        },
-      }
-    );
+	const pushRes = await col.updateOne(
+	  { _id: target._id },
+	  {
+		$push: {
+		  checklist: {
+			key,
+			label: fallbackLabel,
+			dueAt: fallbackDueAt,
+			completedAt: done ? nowISO : null,
+			notes: null,
+		  },
+		},
+	  } as any
+	);
 
     if (pushRes.matchedCount !== 1) {
       return NextResponse.json({ ok: false, error: "update_failed" }, { status: 500 });

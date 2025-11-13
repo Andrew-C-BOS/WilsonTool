@@ -91,8 +91,9 @@ export async function GET() {
     const unitLeases = db.collection("unit_leases");
     const inspections = db.collection("inspections");
 
-    const userIdStr = String((user as any)._id ?? user?.id ?? "");
-    const hm = await memberships.findOne({ userId: userIdStr, active: true });
+    const u: any = user;
+	const userIdStr = String(u._id ?? u.id ?? "");
+	const hm = await memberships.findOne({ userId: userIdStr, active: true });
     if (!hm) return NextResponse.json({ ok: false, error: "no_household" }, { status: 404 });
     const hhId = String(hm.householdId);
 
@@ -145,13 +146,14 @@ export async function PATCH(req: Request) {
       return NextResponse.json({ ok: false, error: "invalid_body" }, { status: 400 });
     }
 
-    const db = await getDb();
-    const memberships = db.collection("household_memberships");
-    const unitLeases = db.collection("unit_leases");
-    const inspections = db.collection("inspections");
+	const db = await getDb();
+	const memberships = db.collection("household_memberships");
+	const unitLeases = db.collection("unit_leases");
+	const inspections = db.collection("inspections");
 
-    const userIdStr = String((user as any)._id ?? user?.id ?? "");
-    const hm = await memberships.findOne({ userId: userIdStr, active: true });
+	const u: any = user;
+	const userIdStr = String(u._id ?? u.id ?? "");
+	const hm = await memberships.findOne({ userId: userIdStr, active: true });
     if (!hm) return NextResponse.json({ ok: false, error: "no_household" }, { status: 404 });
     const hhId = String(hm.householdId);
 
@@ -178,10 +180,14 @@ export async function PATCH(req: Request) {
         createdAt: now,
       };
       await inspections.updateOne(
-        { leaseId, householdId: hhId },
-        { $push: { items: item }, $set: { updatedAt: now }, $setOnInsert: { status: "draft", createdAt: now } },
-        { upsert: true }
-      );
+		  { leaseId, householdId: hhId },
+		  {
+			$push: { items: item },
+			$set: { updatedAt: now },
+			$setOnInsert: { status: "draft", createdAt: now },
+		  } as any,
+		  { upsert: true }
+		);
 
     } else if (body.op === "update_item") {
       const { itemId, description, severity } = body as Extract<PatchBody, { op: "update_item" }>;
@@ -211,10 +217,13 @@ export async function PATCH(req: Request) {
       const itemToDelete = docWithOne?.items?.[0];
 
       // 2) Pull the item from Mongo
-      const res = await inspections.updateOne(
-        { leaseId, householdId: hhId },
-        { $pull: { items: { id: itemId } }, $set: { updatedAt: now } }
-      );
+		const res = await inspections.updateOne(
+		  { leaseId, householdId: hhId },
+		  {
+			$pull: { items: { id: itemId } },
+			$set: { updatedAt: now },
+		  } as any
+		);
       if (res.matchedCount === 0) {
         return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
       }

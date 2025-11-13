@@ -42,7 +42,7 @@ export async function GET(req: Request) {
   // Pull the application (for countersign mins and plan totals)
   const app = await applications
     .findOne(
-      { _id: appIdForLookup },
+      { _id: appIdForLookup as any },
       {
         projection: {
           _id: 1,

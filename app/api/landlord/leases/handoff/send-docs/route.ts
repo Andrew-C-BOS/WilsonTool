@@ -37,7 +37,9 @@ function isHex24(s: string) {
 
 async function asFilter(idLike: string) {
   const { ObjectId } = await import("mongodb");
-  return isHex24(idLike) ? { _id: new ObjectId(idLike) } : { _id: idLike } as any;
+  return (isHex24(idLike)
+    ? { _id: new ObjectId(idLike) }
+    : { _id: idLike }) as any;
 }
 
 // S3 client (reused)
@@ -54,7 +56,6 @@ async function getS3ObjectBase64(key: string): Promise<{ base64: string; content
   const contentType = (res.ContentType as string) || "application/octet-stream";
 
   const chunks: Uint8Array[] = [];
-  // Body is a stream; accumulate into a buffer
   for await (const chunk of res.Body as any) {
     chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
   }
@@ -79,6 +80,8 @@ async function resolveFirmForUser(req: NextRequest, user: { _id: any }) {
     );
   })();
 
+  const firms = db.collection<any>("FirmDoc");
+
   if (firmIdParam) {
     const m = await db
       .collection("firm_memberships")
@@ -89,40 +92,50 @@ async function resolveFirmForUser(req: NextRequest, user: { _id: any }) {
     if (!m) {
       throw new Error("not_in_firm");
     }
-    const firm = await db
-      .collection("FirmDoc")
-      .findOne(
-        isHex24(firmIdParam) ? { _id: new ObjectId(firmIdParam) } : { _id: firmIdParam },
-        { projection: { _id: 1, name: 1, slug: 1 } }
-      );
+
+    const firmFilter: { _id: any } = isHex24(firmIdParam)
+      ? { _id: new ObjectId(firmIdParam) }
+      : { _id: firmIdParam };
+
+    const firm = await firms.findOne(firmFilter, {
+      projection: { _id: 1, name: 1, slug: 1 },
+    });
     if (!firm) throw new Error("invalid_firm");
     return {
       firmId: toStr(firm._id),
       firmName: firm.name as string,
-      firmSlug: firm.slug as string | undefined,
+      firmSlug: (firm as any).slug as string | undefined,
     };
   }
 
   const membership = await db
     .collection("firm_memberships")
-    .findOne({ userId: { $in: userIdCandidates }, active: true }, { projection: { firmId: 1 } });
+    .findOne(
+      { userId: { $in: userIdCandidates }, active: true },
+      { projection: { firmId: 1 } }
+    );
 
   if (!membership) throw new Error("no_firm_membership");
-  const firm = await db
-    .collection("FirmDoc")
-    .findOne({ _id: membership.firmId }, { projection: { _id: 1, name: 1, slug: 1 } });
+
+  const firmFilter2: { _id: any } = isHex24(String(membership.firmId))
+    ? { _id: new ObjectId(String(membership.firmId)) }
+    : { _id: String(membership.firmId) };
+
+  const firm = await firms.findOne(firmFilter2, {
+    projection: { _id: 1, name: 1, slug: 1 },
+  });
   if (!firm) throw new Error("invalid_firm");
   return {
     firmId: toStr(firm._id),
     firmName: firm.name as string,
-    firmSlug: firm.slug as string | undefined,
+    firmSlug: (firm as any).slug as string | undefined,
   };
 }
 
 // Household recipients (based on your webhook)
 async function getHouseholdUserEmails(db: any, householdId: string): Promise<string[]> {
-  const membershipsCollCanonical = db.collection("household_memberships");
-  const membershipsCollLegacy = db.collection("household_memberhsips");
+  const membershipsCollCanonical = db.collection("household_memberships") as any;
+  const membershipsCollLegacy = db.collection("household_memberhsips") as any;
   const { ObjectId } = await import("mongodb");
 
   const isHex = ObjectId.isValid(householdId);
@@ -141,7 +154,7 @@ async function getHouseholdUserEmails(db: any, householdId: string): Promise<str
         .project({ userId: 1, email: 1, role: 1 })
         .toArray();
     } catch {
-      // ignore
+      // ignore legacy errors
     }
   }
 
@@ -153,14 +166,15 @@ async function getHouseholdUserEmails(db: any, householdId: string): Promise<str
   );
 
   const users = userIds.length
-    ? await db
-        .collection("users")
+    ? await (db.collection("users") as any)
         .find({ _id: { $in: userIds } })
         .project({ email: 1, preferredName: 1 })
         .toArray()
     : [];
 
-  const emailByUserIdStr = new Map(users.map((u: any) => [String(u._id), (u.email || "").trim()]));
+  const emailByUserIdStr = new Map<string, string>(
+    users.map((u: any) => [String(u._id), String(u.email || "").trim()])
+  );
 
   const emails = new Set<string>();
   for (const m of mships) {
@@ -209,8 +223,8 @@ export async function POST(req: NextRequest) {
   const firmId = firm.firmId;
 
   // Load application (and related data)
-  const apps = db.collection("applications");
-  const appFilter = await asFilter(appId);
+  const apps = db.collection<any>("applications");
+  const appFilter = (await asFilter(appId)) as any;
   const app = await apps.findOne(appFilter, {
     projection: {
       _id: 1,
@@ -231,12 +245,12 @@ export async function POST(req: NextRequest) {
   }
 
   // Verify app belongs to this firm via form.firmId (or app.firmId)
-  const forms = db.collection("application_forms");
+  const forms = db.collection<any>("application_forms");
   const formIdRaw = (app as any).formId;
   let owningFirmId: string | undefined;
 
   if (formIdRaw) {
-    const formFilter = isHex24(String(formIdRaw))
+    const formFilter: { _id: any } = isHex24(String(formIdRaw))
       ? { _id: new ObjectId(String(formIdRaw)) }
       : { _id: String(formIdRaw) };
     const form = await forms.findOne(formFilter, { projection: { firmId: 1 } });
@@ -291,19 +305,24 @@ export async function POST(req: NextRequest) {
   });
 
   // Advance state: min_paid -> countersigned via signatures_completed
-  let nextStatus = currentStatus;
+  let nextStatus: AppState = currentStatus;
   if (nextStatus === "min_paid") {
-    nextStatus = computeNextState(nextStatus, "signatures_completed", "system", {
-      terms,
-      minRules,
-      signaturesCount: 2,
-    });
+    nextStatus = computeNextState(
+      nextStatus as any,
+      "signatures_completed",
+      "system",
+      {
+        terms,
+        minRules,
+        signaturesCount: 2,
+      }
+    ) as AppState;
   }
 
   const now = new Date();
 
   // Load selected landlord docs INCLUDING S3 metadata
-  const docsColl = db.collection("landlord_documents");
+  const docsColl = db.collection<any>("landlord_documents");
   const docIds = docs.map((id) => (isHex24(id) ? new ObjectId(id) : id));
   const docRows = await docsColl
     .find({ _id: { $in: docIds }, firmId })
@@ -327,7 +346,7 @@ export async function POST(req: NextRequest) {
   }));
 
   // Build unit_lease document
-  const leases = db.collection("unit_leases");
+  const leases = db.collection<any>("unit_leases");
 
   const moveInISO = String(plan.startDate);
   const moveOutISO =
@@ -337,9 +356,10 @@ export async function POST(req: NextRequest) {
           if (!y || !m || !d) return null;
           const dt = new Date(Date.UTC(y, m - 1, d));
           dt.setUTCMonth(dt.getUTCMonth() + plan.termMonths);
-          return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, "0")}-${String(
-            dt.getUTCDate()
-          ).toString().padStart(2, "0")}`;
+          return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(
+            2,
+            "0"
+          )}-${String(dt.getUTCDate()).padStart(2, "0")}`;
         })()
       : null;
 
@@ -379,10 +399,10 @@ export async function POST(req: NextRequest) {
     })),
   };
 
-  await leases.insertOne(leaseDoc);
+  await leases.insertOne(leaseDoc as any);
 
   // Update application status & link leaseId
-  await apps.updateOne(appFilter, {
+  const updateDoc: any = {
     $set: {
       status: nextStatus,
       leaseId,
@@ -402,7 +422,9 @@ export async function POST(req: NextRequest) {
         },
       },
     },
-  });
+  };
+
+  await apps.updateOne(appFilter, updateDoc);
 
   // Build SES attachments from S3
   const attachments = await Promise.all(
@@ -416,7 +438,6 @@ export async function POST(req: NextRequest) {
           contentBase64: base64,
         };
       } catch (e) {
-        // If S3 fetch fails, just skip that attachment
         console.error("[handoff] failed to fetch S3 object", d.objectKey, e);
         return null;
       }
@@ -439,13 +460,13 @@ export async function POST(req: NextRequest) {
       const premises = b
         ? `${b.addressLine1 ?? ""}${b.addressLine2 ? `, ${b.addressLine2}` : ""}, ${
             b.city ?? ""
-          }, ${b.state ?? ""} ${b.postalCode ?? ""}${u?.unitNumber ? ` — ${u.unitNumber}` : ""}`
+          }, ${b.state ?? ""} ${b.postalCode ?? ""}${
+            u?.unitNumber ? ` — ${u.unitNumber}` : ""
+          }`
         : "Your new home";
 
       const subject = `Your lease is ready – ${premises}`;
-      const docsList = selectedDocRecords
-        .map((d) => `• ${d.title}`)
-        .join("\n");
+      const docsList = selectedDocRecords.map((d) => `• ${d.title}`).join("\n");
 
       const checklistList = leaseChecklist
         .map((c) => `• ${c.label} (due by ${c.dueAt ?? "TBD"})`)
@@ -470,9 +491,7 @@ export async function POST(req: NextRequest) {
         `<p>Your lease for <strong>${premises}</strong> has been finalized.</p>` +
         `<p><strong>Included documents (attached):</strong><br>` +
         (selectedDocRecords.length
-          ? `<ul>${selectedDocRecords
-              .map((d) => `<li>${d.title}</li>`)
-              .join("")}</ul>`
+          ? `<ul>${selectedDocRecords.map((d) => `<li>${d.title}</li>`).join("")}</ul>`
           : `<em>No documents were attached.</em>`) +
         `</p>` +
         `<p><strong>Next steps / checklist:</strong><br>` +

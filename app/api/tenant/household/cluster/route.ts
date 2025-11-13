@@ -145,22 +145,27 @@ export async function GET(req: NextRequest) {
 
       household = await householdsCol.findOne({ _id: newId });
     }
+	if (!household) {
+	  return NextResponse.json(
+		{ ok: false, error: "household_not_found" },
+		{ status: 404 }
+	  );
+	}
 
     // 5) Fetch all memberships for this household (from BOTH collections)
-    const householdMatch = [
-      { householdId: toStringId(household._id) },
-      { householdId: household._id }, // ObjectId form
-    ];
+	const householdMatch = [
+	  { householdId: toStringId(household!._id) },
+	  { householdId: household!._id }, // ObjectId form
+	];
 
-    const [membersA, membersB] = await Promise.all([
-      membershipsTypoCol
-        .find({ $or: householdMatch, active: { $in: [true, false] } })
-        .toArray(),
-      membershipsCol
-        .find({ $or: householdMatch, active: { $in: [true, false] } })
-        .toArray(),
-    ]);
-
+	const [membersA, membersB] = await Promise.all([
+	  membershipsTypoCol
+		.find({ $or: householdMatch, active: { $in: [true, false] } })
+		.toArray(),
+	  membershipsCol
+		.find({ $or: householdMatch, active: { $in: [true, false] } })
+		.toArray(),
+	]);
     // Merge + de-dupe on userId/email
     const seen = new Set<string>();
     const merged = [...membersA, ...membersB].filter((m) => {
@@ -190,18 +195,18 @@ export async function GET(req: NextRequest) {
     }
 
     // 7) Invite link (optional fields, safe defaults)
-    const inviteCode = household.inviteCode ?? "";
-    const origin = new URL(req.url).origin;
-    const inviteUrl = inviteCode ? `${origin}/join/${inviteCode}` : "";
+		const inviteCode = household.inviteCode ?? "";
+		const origin = new URL(req.url).origin;
+		const inviteUrl = inviteCode ? `${origin}/join/${inviteCode}` : "";
 
-    const cluster = {
-      householdId: toStringId(household._id),
-      displayName: household.displayName ?? null,
-      inviteCode,
-      inviteUrl,
-      members,
-      pendingRequests: [] as any[], // wire real source when available
-    };
+		const cluster = {
+		  householdId: toStringId(household._id),
+		  displayName: household.displayName ?? null,
+		  inviteCode,
+		  inviteUrl,
+		  members,
+		  pendingRequests: [] as any[],
+		};
 
     return NextResponse.json({ ok: true, cluster });
   } catch (err: any) {

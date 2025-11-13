@@ -11,7 +11,6 @@ export const dynamic = "force-dynamic";
 async function resolveParams(
   p: { id: string } | Promise<{ id: string }>
 ): Promise<{ id: string }> {
-  // @ts-expect-error — in newer Next, params is a Promise; in older, it's an object
   return typeof (p as any)?.then === "function" ? await p : (p as any);
 }
 

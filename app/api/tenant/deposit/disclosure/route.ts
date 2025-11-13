@@ -39,20 +39,23 @@ export async function GET(req: Request) {
   const db = await getDb();
 
   // --- Application lookup: support _id stored as ObjectId (canonical) or string (defensive) ---
-  const appIdObj = toObjectIdMaybe(appIdParam);
-  const app = await db.collection("applications").findOne({
-    $or: [
-      { _id: appIdParam },              // string id (if stored as string)
-      ...(appIdObj ? [{ _id: appIdObj }] : []), // ObjectId
-    ],
-  });
+	const appIdObj = toObjectIdMaybe(appIdParam);
+
+	const app = await db.collection("applications").findOne(
+	  {
+		$or: [
+		  { _id: appIdParam as any }, // string id (if stored as string)
+		  ...(appIdObj ? [{ _id: appIdObj }] : []), // ObjectId
+		],
+	  } as any
+	);
 
   if (!app) {
     return NextResponse.json({ ok: false, error: "application_not_found" }, { status: 404 });
   }
 
   // --- Firm lookup (your firmId is a string like "firm_...") ---
-  const firm = await db.collection("firms").findOne({ _id: firmId });
+  const firm = await db.collection("firms").findOne({ _id: firmId as any });
   if (!firm) {
     return NextResponse.json({ ok: false, error: "firm_not_found" }, { status: 404 });
   }

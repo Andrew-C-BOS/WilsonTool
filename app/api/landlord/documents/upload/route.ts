@@ -3,10 +3,7 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
 import { getSessionUser } from "@/lib/auth";
-import {
-  S3Client,
-  PutObjectCommand,
-} from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 export const runtime = "nodejs";
@@ -32,7 +29,7 @@ function toStr(v: any): string {
   }
 }
 
-/* reuse the same firm resolver as in list route */
+/* reuse the same firm resolver style as in list route */
 async function resolveFirmForUser(req: NextRequest, user: { _id: any }) {
   const db = await getDb();
   const firmIdParam = req.nextUrl.searchParams.get("firmId") ?? undefined;
@@ -41,13 +38,17 @@ async function resolveFirmForUser(req: NextRequest, user: { _id: any }) {
   const userIdCandidates = (() => {
     const out: any[] = [];
     if (user?._id != null) out.push(user._id);
-    const asOid = ObjectId.isValid(String(user?._id)) ? new ObjectId(String(user._id)) : null;
+    const asOid = ObjectId.isValid(String(user?._id))
+      ? new ObjectId(String(user._id))
+      : null;
     if (asOid) out.push(asOid);
     if (user?._id instanceof ObjectId) out.push(String(user._id));
     return Array.from(new Set(out.map(String))).map((s) =>
       ObjectId.isValid(s) ? new ObjectId(s) : s
     );
   })();
+
+  const firms = db.collection<any>("FirmDoc");
 
   if (firmIdParam) {
     const m = await db
@@ -58,21 +59,27 @@ async function resolveFirmForUser(req: NextRequest, user: { _id: any }) {
       );
     if (!m) throw new Error("not_in_firm");
 
-    const firm = await db
-      .collection("FirmDoc")
-      .findOne(
-        ObjectId.isValid(firmIdParam)
-          ? { _id: new ObjectId(firmIdParam) }
-          : { _id: firmIdParam },
-        { projection: { _id: 1, name: 1, slug: 1 } }
-      );
+    const firmFilter: { _id: any } = ObjectId.isValid(firmIdParam)
+      ? { _id: new ObjectId(firmIdParam) }
+      : { _id: firmIdParam };
+
+    const firm = await firms.findOne(firmFilter, {
+      projection: { _id: 1, name: 1, slug: 1 },
+    });
     if (!firm) throw new Error("invalid_firmId");
-    return { firmId: toStr(firm._id), firmName: String(firm.name || "—"), firmSlug: firm.slug };
+    return {
+      firmId: toStr(firm._id),
+      firmName: String(firm.name || "—"),
+      firmSlug: firm.slug,
+    };
   }
 
   const memberships = await db
     .collection("firm_memberships")
-    .find({ userId: { $in: userIdCandidates }, active: true }, { projection: { firmId: 1 } })
+    .find(
+      { userId: { $in: userIdCandidates }, active: true },
+      { projection: { firmId: 1 } }
+    )
     .limit(5)
     .toArray();
 
@@ -80,17 +87,20 @@ async function resolveFirmForUser(req: NextRequest, user: { _id: any }) {
   if (memberships.length > 1) throw new Error("ambiguous_firm");
 
   const firmId = memberships[0].firmId;
-  const firm = await db
-    .collection("FirmDoc")
-    .findOne(
-      ObjectId.isValid(String(firmId))
-        ? { _id: new ObjectId(String(firmId)) }
-        : { _id: String(firmId) },
-      { projection: { _id: 1, name: 1, slug: 1 } }
-    );
+  const firmFilter2: { _id: any } = ObjectId.isValid(String(firmId))
+    ? { _id: new ObjectId(String(firmId)) }
+    : { _id: String(firmId) };
+
+  const firm = await firms.findOne(firmFilter2, {
+    projection: { _id: 1, name: 1, slug: 1 },
+  });
   if (!firm) throw new Error("invalid_membership");
 
-  return { firmId: toStr(firm._id), firmName: String(firm.name || "—"), firmSlug: firm.slug };
+  return {
+    firmId: toStr(firm._id),
+    firmName: String(firm.name || "—"),
+    firmSlug: firm.slug,
+  };
 }
 
 function sanitizeFileName(name: string): string {
@@ -140,17 +150,18 @@ export async function POST(req: NextRequest) {
   }
 
   const db = await getDb();
-  const { ObjectId } = await import("mongodb");
 
   try {
-    const firm = await resolveFirmForUser(req, user);
+    const firm = await resolveFirmForUser(req, user as any);
 
     const body = await req.json().catch(() => ({} as any));
     const title = String(body.title || "").trim();
     const internalDescription = String(body.internalDescription || "").trim();
     const externalDescription = String(body.externalDescription || "").trim();
     const fileNameRaw = String(body.fileName || "").trim();
-    const contentType = String(body.contentType || "application/octet-stream");
+    const contentType = String(
+      body.contentType || "application/octet-stream"
+    );
 
     if (!title) {
       return NextResponse.json(
@@ -180,7 +191,9 @@ export async function POST(req: NextRequest) {
       contentType,
       createdAt: now,
       updatedAt: now,
-      createdBy: toStr((user as any)?._id ?? (user as any)?.email ?? "system"),
+      createdBy: toStr(
+        (user as any)?._id ?? (user as any)?.email ?? "system"
+      ),
     });
 
     const docId = insertRes.insertedId;

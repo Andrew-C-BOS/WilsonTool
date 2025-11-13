@@ -50,33 +50,46 @@ function Badge({ children, tone = "gray" }: { children: React.ReactNode; tone?: 
 
 /** ---------- Per-token polling lock (so only one tab polls) ---------- */
 function useTokenPollLock(token: string) {
-  const pageIdRef = useRef<string>(() =>
-    (typeof crypto !== "undefined" && "randomUUID" in crypto) ? crypto.randomUUID() : String(Math.random())
-  );
-  // @ts-ignore
-  const pageId = (pageIdRef.current as unknown as () => string)();
+  const pageIdRef = useRef<string | null>(null);
+
+  // Lazily initialize pageId once
+  if (!pageIdRef.current) {
+    const hasCrypto =
+      typeof crypto !== "undefined" && "randomUUID" in crypto;
+    pageIdRef.current = hasCrypto
+      ? (crypto as any).randomUUID()
+      : String(Math.random());
+  }
+
+  const pageId = pageIdRef.current!; // guaranteed set above
 
   const KEY = `hold_poll_lock:${token}`;
   const HEARTBEAT_KEY = `hold_poll_lock_hb:${token}`;
 
-  function now() { return Date.now(); }
+  function now() {
+    return Date.now();
+  }
 
   function acquireLock(): boolean {
     try {
       const existing = localStorage.getItem(KEY);
       const hb = Number(localStorage.getItem(HEARTBEAT_KEY) || "0");
-      const stale = !existing || (now() - hb) > 15000; // 15s without heartbeat → stale
+      const stale = !existing || now() - hb > 15000; // 15s without heartbeat → stale
       if (!existing || stale) {
         localStorage.setItem(KEY, pageId);
         localStorage.setItem(HEARTBEAT_KEY, String(now()));
         return true;
       }
       return existing === pageId;
-    } catch { return true; } // if storage blocked, just proceed
+    } catch {
+      return true; // if storage blocked, just proceed
+    }
   }
 
   function beat() {
-    try { localStorage.setItem(HEARTBEAT_KEY, String(now())); } catch {}
+    try {
+      localStorage.setItem(HEARTBEAT_KEY, String(now()));
+    } catch {}
   }
 
   function releaseLock() {

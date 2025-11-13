@@ -31,7 +31,7 @@ function isObjectIdLike(v: string) {
   return /^[a-f\d]{24}$/i.test(v);
 }
 function toObjectIdOrString(v: string) {
-  return isObjectIdLike(v) ? new ObjectId(v) : v;
+  return (isObjectIdLike(v) ? new ObjectId(v) : v) as any;
 }
 function safeNum(x: any, d = 0) {
   const n = Number(x);

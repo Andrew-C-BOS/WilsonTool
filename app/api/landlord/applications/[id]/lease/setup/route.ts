@@ -146,7 +146,7 @@ async function resolveFirmIdForApp(db: any, formId: IdLike): Promise<string> {
     { status: 410 } // Gone
   );
 }
-export async function POST(req: Request, { params }: { params: { id: string } }) {
+/*export async function POST(req: Request, { params }: { params: { id: string } }) {
   const user = await getSessionUser();
   if (!user) return NextResponse.json({ ok: false, error: "not_authenticated" }, { status: 401 });
 
@@ -298,12 +298,12 @@ export async function POST(req: Request, { params }: { params: { id: string } })
     createdAt: now, updatedAt: now,
   };
   const leaseInsert = await leases.insertOne(lease);
-  const leaseId = toStr(leaseInsert.insertedId);
+  const leaseId = toStr(leaseInsert.insertedId);*/
 
   /* ─────────────────────────────────────────────────────────────
      Obligations (truth) + Scheduled payments (UX)
   ───────────────────────────────────────────────────────────── */
-  const obls: ObligationDoc[] = [];
+  /*const obls: ObligationDoc[] = [];
 
   // Upfront obligations
   if (reqFirst) {
@@ -426,4 +426,4 @@ export async function POST(req: Request, { params }: { params: { id: string } })
       holdingCreated: holdingAmt > 0 ? 1 : 0,
     },
   });
-}
+}*/

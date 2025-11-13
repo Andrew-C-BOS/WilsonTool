@@ -25,45 +25,50 @@ export async function ensureSoloHousehold(user: { _id: Id; email?: string; name?
 
   // Atomic claim: if an active membership exists, we get it; otherwise we insert one with our proposed household id.
   // This collapses "check then insert" into a single round trip and prevents two winners.
-  let m: HouseholdMembershipDoc | null = null;
-  try {
-    const result = await memberships.findOneAndUpdate(
-      {
-        active: true,
-        $or: [{ userId }, ...(emailLC ? [{ email: emailLC }] as any[] : [])],
-      },
-      {
-        $setOnInsert: {
-          _id: new ObjectId().toString(),
-          householdId: proposedHid,
-          userId,
-          role: "primary",
-          active: true,
-          joinedAt: now,
-          email: emailLC,
-          name: (user as any).name ?? null,
-        } satisfies Partial<HouseholdMembershipDoc>,
-        $set: { updatedAt: now } as any,
-      },
-      { upsert: true, returnDocument: "after" }
-    );
-    m = result.value as any;
-  } catch (e: any) {
-    // If a unique index rejects the second concurrent writer, re-read the winner.
-    const isDup = e?.code === 11000 || String(e?.message || "").includes("E11000");
-    if (!isDup) throw e;
-    m = await memberships.findOne({
+let m: HouseholdMembershipDoc | null = null;
+
+try {
+  const result = await memberships.findOneAndUpdate(
+    {
       active: true,
       $or: [{ userId }, ...(emailLC ? [{ email: emailLC }] as any[] : [])],
-    }) as any;
-  }
+    },
+    {
+      $setOnInsert: {
+        _id: new ObjectId().toString(),
+        householdId: proposedHid,
+        userId,
+        role: "primary",
+        active: true,
+        joinedAt: now,
+        email: emailLC,
+        name: (user as any).name ?? null,
+      } satisfies Partial<HouseholdMembershipDoc>,
+      $set: { updatedAt: now } as any,
+    },
+    { upsert: true, returnDocument: "after" }
+  );
+
+  // result is already the doc (or null)
+  m = (result as any) ?? null;
+} catch (e: any) {
+  // If a unique index rejects the second concurrent writer, re-read the winner.
+  const isDup =
+    e?.code === 11000 || String(e?.message || "").includes("E11000");
+  if (!isDup) throw e;
+
+  m = (await memberships.findOne({
+    active: true,
+    $or: [{ userId }, ...(emailLC ? [{ email: emailLC }] as any[] : [])],
+  })) as any;
+}
 
   if (!m) {
     // Extremely rare: retry a read; if still missing, bail.
-    m = await memberships.findOne({
+    m = (await memberships.findOne({
       active: true,
       $or: [{ userId }, ...(emailLC ? [{ email: emailLC }] as any[] : [])],
-    }) as any;
+    })) as any;
     if (!m) throw new Error("failed_to_establish_household");
   }
 

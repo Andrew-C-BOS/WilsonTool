@@ -265,22 +265,22 @@ export async function POST(req: Request) {
     const households = db.collection("households");
 
     /* ---------- load application ---------- */
-    const appLookupId = toObjectIdOrString(appId);
-    const appDoc = await applications.findOne(
-      { _id: appLookupId },
-      {
-        projection: {
-          _id: 1,
-          formId: 1,
-          firmId: 1,
-          householdId: 1,
-          countersign: 1,
-          paymentPlan: 1,
-          upfronts: 1,
-          answersByMember: 1,
-        },
-      }
-    );
+	const appLookupId = toObjectIdOrString(appId);
+	const appDoc = await applications.findOne(
+	  { _id: appLookupId as any },
+	  {
+		projection: {
+		  _id: 1,
+		  formId: 1,
+		  firmId: 1,
+		  householdId: 1,
+		  countersign: 1,
+		  paymentPlan: 1,
+		  upfronts: 1,
+		  answersByMember: 1,
+		},
+	  }
+	);
     debug.resolved.appProjection = appDoc ?? null;
     if (!appDoc) {
       debug.step = "app_not_found";
@@ -310,14 +310,22 @@ export async function POST(req: Request) {
     /* ---------- resolve firmId ---------- */
     let firmId: string | null | undefined = firmIdRaw ?? null;
     if (!firmId && appDoc.firmId) firmId = String(appDoc.firmId);
-    if (!firmId && appDoc.formId) {
-      const form = await applicationForms.findOne(
-        { _id: isObjectIdLike(appDoc.formId) ? new ObjectId(String(appDoc.formId)) : String(appDoc.formId) },
-        { projection: { firmId: 1, firmName: 1, firmSlug: 1 } }
-      );
-      if (form?.firmId) firmId = String(form.firmId);
-      debug.resolved.formBridge = form ? { firmId: form.firmId, firmName: form.firmName, firmSlug: form.firmSlug } : null;
-    }
+	if (!firmId && appDoc.formId) {
+	  const formIdLookup =
+		isObjectIdLike(appDoc.formId)
+		  ? new ObjectId(String(appDoc.formId))
+		  : String(appDoc.formId);
+
+	  const form = await applicationForms.findOne(
+		{ _id: formIdLookup as any },
+		{ projection: { firmId: 1, firmName: 1, firmSlug: 1 } }
+	  );
+
+	  if (form?.firmId) firmId = String(form.firmId);
+	  debug.resolved.formBridge = form
+		? { firmId: form.firmId, firmName: form.firmName, firmSlug: form.firmSlug }
+		: null;
+	}
     if (!firmId) {
       const leaseByApp = await leases.findOne(
         { appId },
@@ -335,7 +343,10 @@ export async function POST(req: Request) {
     }
 
     /* ---------- routing accounts ---------- */
-    const firm = await firms.findOne({ _id: firmId }, { projection: { stripe: 1, name: 1, _id: 1 } });
+    const firm = await firms.findOne(
+	  { _id: firmId as any },
+	  { projection: { stripe: 1, name: 1, _id: 1 } }
+	);
     debug.resolved.firmDoc = {
       _id: firm?._id ?? null,
       name: firm?.name ?? null,
@@ -481,15 +492,22 @@ export async function POST(req: Request) {
     // Reuse saved bank if available (off_session)
     let stripeCustomerId: string | null = null;
     let defaultUsBankPmId: string | null = null;
-    if (hhId) {
-      const hh = await households.findOne(
-        { _id: isObjectIdLike(hhId) ? new ObjectId(hhId) : hhId },
-        { projection: { stripeCustomerId: 1, defaultUsBankPaymentMethodId: 1 } }
-      );
-      stripeCustomerId = (hh as any)?.stripeCustomerId ?? null;
-      defaultUsBankPmId = (hh as any)?.defaultUsBankPaymentMethodId ?? null;
-      debug.resolved.householdStripe = { stripeCustomerId, defaultUsBankPaymentMethodId: defaultUsBankPmId };
-    }
+	if (hhId) {
+	  const hhLookupId =
+		isObjectIdLike(hhId) ? new ObjectId(hhId) : hhId;
+
+	  const hh = await households.findOne(
+		{ _id: hhLookupId as any },
+		{ projection: { stripeCustomerId: 1, defaultUsBankPaymentMethodId: 1 } }
+	  );
+
+	  stripeCustomerId = (hh as any)?.stripeCustomerId ?? null;
+	  defaultUsBankPmId = (hh as any)?.defaultUsBankPaymentMethodId ?? null;
+	  debug.resolved.householdStripe = {
+		stripeCustomerId,
+		defaultUsBankPaymentMethodId: defaultUsBankPmId,
+	  };
+	}
 
     /* ---------- reuse/cancel existing PI (confirmable) ---------- */
     const existing = await paymentsCol.findOne(

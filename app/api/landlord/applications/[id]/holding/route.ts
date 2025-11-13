@@ -49,7 +49,7 @@ export async function POST() {
   );
 }
 
-export async function POST(
+/*export async function POST(
   req: NextRequest,
   ctx: { params: { id: string } } | { params: Promise<{ id: string }> }
 ) {
@@ -201,4 +201,4 @@ export async function POST(
     total,
     minimumDue,
   });
-}
+}*/

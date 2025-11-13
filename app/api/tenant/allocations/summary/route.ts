@@ -195,11 +195,11 @@ export async function GET(req: Request) {
     const paymentsCol = db.collection("payments");
 
     // Load app (support ObjectId or string id)
-    const appIdForLookup = toObjectIdOrString(appIdRaw);
-    const app = await applications.findOne(
-      { _id: appIdForLookup },
-      { projection: { _id: 1, paymentPlan: 1, upfronts: 1 } }
-    );
+	const appIdForLookup = toObjectIdOrString(appIdRaw) as any;
+	const app = await applications.findOne(
+	  { _id: appIdForLookup },
+	  { projection: { _id: 1, paymentPlan: 1, upfronts: 1 } }
+	);
 
     // Build addressable charges (includes key/first/last + monthly rent + deposit)
     const charges = buildCharges(appIdRaw, app);

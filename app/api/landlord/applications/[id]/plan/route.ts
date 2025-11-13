@@ -28,7 +28,10 @@ function toStr(v: any) {
 }
 async function getParamsId(
   _req: NextRequest,
-  ctx: { params?: { id: string } } | { params?: Promise<{ id: string }> } | any
+  ctx:
+    | { params?: { id: string } }
+    | { params?: Promise<{ id: string }> }
+    | any
 ) {
   try {
     const p = await ctx?.params;
@@ -64,11 +67,16 @@ Returns: { ok: true, paymentPlan, nextStatus }
 ---------------------------------------------------------------------------*/
 export async function POST(
   req: NextRequest,
-  ctx: { params?: { id: string } } | { params?: Promise<{ id: string }> }
+  ctx:
+    | { params?: { id: string } }
+    | { params?: Promise<{ id: string }> }
 ) {
   const user = await getSessionUser();
   if (!user) {
-    return NextResponse.json({ ok: false, error: "not_authenticated" }, { status: 401 });
+    return NextResponse.json(
+      { ok: false, error: "not_authenticated" },
+      { status: 401 }
+    );
   }
 
   const db = await getDb();
@@ -76,11 +84,17 @@ export async function POST(
 
   const appId = await getParamsId(req, ctx);
   if (!appId) {
-    return NextResponse.json({ ok: false, error: "bad_application_id" }, { status: 400 });
+    return NextResponse.json(
+      { ok: false, error: "bad_application_id" },
+      { status: 400 }
+    );
   }
 
-  const apps = db.collection("applications");
-  const appFilter = isHex24(appId) ? { _id: new ObjectId(appId) } : { _id: appId };
+  // Loosen types: this collection can hold _id as ObjectId or string.
+  const apps = db.collection<any>("applications");
+  const appFilter: { _id: any } = isHex24(appId)
+    ? { _id: new ObjectId(appId) }
+    : { _id: appId };
 
   // Load application with status + building/unit so we can derive "terms"
   const app = await apps.findOne(appFilter, {
@@ -94,7 +108,10 @@ export async function POST(
   });
 
   if (!app) {
-    return NextResponse.json({ ok: false, error: "application_not_found" }, { status: 404 });
+    return NextResponse.json(
+      { ok: false, error: "application_not_found" },
+      { status: 404 }
+    );
   }
 
   const body = await req.json().catch(() => ({} as any));
@@ -106,17 +123,32 @@ export async function POST(
   const requireFirst = !!body.requireFirstBeforeMoveIn;
   const requireLast = !!body.requireLastBeforeMoveIn;
 
-  const csUpfront = Math.max(0, Number(body.countersignUpfrontThresholdCents || 0));
-  const csDeposit = Math.max(0, Number(body.countersignDepositThresholdCents || 0));
+  const csUpfront = Math.max(
+    0,
+    Number(body.countersignUpfrontThresholdCents || 0)
+  );
+  const csDeposit = Math.max(
+    0,
+    Number(body.countersignDepositThresholdCents || 0)
+  );
 
   if (m <= 0) {
-    return NextResponse.json({ ok: false, error: "bad_monthly" }, { status: 400 });
+    return NextResponse.json(
+      { ok: false, error: "bad_monthly" },
+      { status: 400 }
+    );
   }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
-    return NextResponse.json({ ok: false, error: "bad_start_date" }, { status: 400 });
+    return NextResponse.json(
+      { ok: false, error: "bad_start_date" },
+      { status: 400 }
+    );
   }
   if (security > m) {
-    return NextResponse.json({ ok: false, error: "security_gt_monthly" }, { status: 400 });
+    return NextResponse.json(
+      { ok: false, error: "security_gt_monthly" },
+      { status: 400 }
+    );
   }
 
   // clamp countersign mins to their legal maximums
@@ -153,9 +185,7 @@ export async function POST(
     ],
   };
 
-  // ─────────────────────────────────────────────
-  // New: derive minRules from *clamped* thresholds
-  // ─────────────────────────────────────────────
+  // derive minRules from *clamped* thresholds
   const minRules = deriveMinRulesFromPlan({
     countersignUpfrontThresholdCents: csUpfrontClamped,
     countersignDepositThresholdCents: csDepositClamped,
@@ -164,7 +194,9 @@ export async function POST(
   // Build a minimal "terms" snapshot for the rules engine
   const building = (app as any).building || null;
   const addressFreeform = building
-    ? `${building.addressLine1 || ""}, ${building.city || ""}, ${building.state || ""} ${building.postalCode || ""}`.trim()
+    ? `${building.addressLine1 || ""}, ${building.city || ""}, ${
+        building.state || ""
+      } ${building.postalCode || ""}`.trim()
     : "Lease address";
 
   const terms: Terms = {
@@ -178,7 +210,7 @@ export async function POST(
   };
 
   // Current app status (default conservatively to "approved_high" if missing)
-  const currentStatus = (String(app.status ?? "approved_high") as AppState);
+  const currentStatus = String(app.status ?? "approved_high") as AppState;
 
   // Step 1: approved_high -> terms_set (if appropriate)
   let nextStatus = computeNextState(currentStatus, "set_terms", "admin", {
@@ -193,7 +225,29 @@ export async function POST(
   });
 
   const now = new Date();
-  await apps.updateOne(appFilter, {
+
+  const timelineEntry = {
+    at: now,
+    by: toStr(
+      (user as any)?._id ??
+        (user as any)?.email ??
+        "system"
+    ),
+    event: "lease.plan.set",
+    meta: {
+      requireFirst,
+      requireLast,
+      csUpfrontClamped,
+      csDepositClamped,
+      minRulesCount: minRules.length,
+      from: currentStatus,
+      to: nextStatus,
+      via: "rules.system_min_ready",
+    },
+  };
+
+  // Build update doc separately and cast to any to dodge overly strict typings
+  const updateDoc: any = {
     $set: {
       paymentPlan,
       updatedAt: now,
@@ -205,23 +259,11 @@ export async function POST(
       },
     },
     $push: {
-      timeline: {
-        at: now,
-        by: toStr((user as any)?._id ?? (user as any)?.email ?? "system"),
-        event: "lease.plan.set",
-        meta: {
-          requireFirst,
-          requireLast,
-          csUpfrontClamped,
-          csDepositClamped,
-          minRulesCount: minRules.length,
-          from: currentStatus,
-          to: nextStatus,
-          via: "rules.system_min_ready",
-        },
-      },
+      timeline: timelineEntry,
     },
-  });
+  };
+
+  await apps.updateOne(appFilter, updateDoc);
 
   return NextResponse.json({ ok: true, paymentPlan, nextStatus });
 }

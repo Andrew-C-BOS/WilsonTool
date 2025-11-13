@@ -124,8 +124,9 @@ export async function GET() {
     const leasesColAlt     = db.collection("unit_leases");   // your actual data
 
     // membership lookup (userId stored as string)
-    const userIdStr = String((user as any)._id ?? user?.id ?? "");
-    const hm = await memberships.findOne({ userId: userIdStr, active: true });
+	const u: any = user;
+	const userIdStr = String(u._id ?? u.id ?? "");
+	const hm = await memberships.findOne({ userId: userIdStr, active: true });
     if (!hm) {
       console.warn("[lease][hm] no active household for user", { userIdStr });
       return NextResponse.json(
@@ -234,29 +235,32 @@ export async function GET() {
         (parseDateOnly(a.moveOutDate ?? a.moveInDate)?.getTime() ?? 0)
     );
 
-    const normalize = (doc: any) =>
-      doc
-        ? (() => {
-            const docsRaw = Array.isArray(doc.documents) ? doc.documents : [];
-            const documents = docsRaw
-              .map((raw) => mapLeaseDocument(raw, doc))
-              .filter((d): d is LeaseDocument => !!d);
+	const normalize = (doc: any) =>
+	  doc
+		? (() => {
+			const docsRaw = Array.isArray(doc.documents) ? doc.documents : [];
+			const documents = docsRaw
+			  .map((raw: any) => mapLeaseDocument(raw, doc))
+			  .filter(
+				(d: LeaseDocument | null): d is LeaseDocument =>
+				  d !== null
+			  );
 
-            return {
-              ...doc,
-              _id:        norm(doc._id),
-              firmId:     norm(doc.firmId),
-              appId:      norm(doc.appId),
-              householdId:norm(doc.householdId),
-              propertyId: norm(doc.propertyId),
-              unitId:     norm(doc.unitId),
+			return {
+			  ...doc,
+			  _id:        norm(doc._id),
+			  firmId:     norm(doc.firmId),
+			  appId:      norm(doc.appId),
+			  householdId:norm(doc.householdId),
+			  propertyId: norm(doc.propertyId),
+			  unitId:     norm(doc.unitId),
 
-              // normalized documents with S3 URL + key
-              documents,
-            };
-          })()
-        : null;
-
+			  // normalized documents with S3 URL + key
+			  documents,
+			};
+		  })()
+		: null;
+		
     const payload = {
       current: normalize(current),
       upcoming: upcoming.map(normalize),

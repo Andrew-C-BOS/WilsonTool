@@ -36,10 +36,10 @@ export async function GET(req: Request) {
     const appId = toObjectIdOrString(appIdRaw);
 
     // Load app to get householdId for permission check
-    const appDoc = await applications.findOne(
-      { _id: appId },
-      { projection: { _id: 1, householdId: 1 } }
-    );
+	const appDoc = await applications.findOne(
+	  { _id: appId as any },
+	  { projection: { _id: 1, householdId: 1 } }
+	);
     if (!appDoc) {
       return NextResponse.json({ ok: false, error: "app_not_found" }, { status: 404 });
     }

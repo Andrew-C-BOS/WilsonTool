@@ -28,6 +28,23 @@ function toMaybeObjectId(v: any): ObjectId | null {
   }
 }
 
+/** Unified “user-ish” shape that can represent both Mongo docs and SessionUser */
+type UserDocLike = {
+  _id?: any;
+  id?: any;
+  userId?: any;
+  email?: string;
+  preferredName?: string | null;
+  [key: string]: any;
+};
+
+function userIdString(u: UserDocLike): string {
+  return toStringId(u._id ?? u.id ?? u.userId);
+}
+function userEmailLower(u: UserDocLike): string {
+  return lc(u.email ?? "");
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -36,7 +53,10 @@ export async function POST(req: NextRequest) {
     const doSwitch = body?.switch === true; // ← allow explicit switch to invited account
 
     if (!code || !otp) {
-      return NextResponse.json({ ok: false, error: "missing_params" }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "missing_params" },
+        { status: 400 }
+      );
     }
 
     const db = await getDb();
@@ -48,23 +68,43 @@ export async function POST(req: NextRequest) {
 
     const codeHash = sha256(code);
     const inv = await invites.findOne({ codeHash, state: "active" as const });
-    if (!inv) return NextResponse.json({ ok: false, error: "invalid_or_used" }, { status: 404 });
+    if (!inv) {
+      return NextResponse.json(
+        { ok: false, error: "invalid_or_used" },
+        { status: 404 }
+      );
+    }
 
     const now = new Date();
     if (inv.expiresAt && new Date(inv.expiresAt) < now) {
-      return NextResponse.json({ ok: false, error: "expired" }, { status: 410 });
+      return NextResponse.json(
+        { ok: false, error: "expired" },
+        { status: 410 }
+      );
     }
 
     // OTP checks
     if (!inv.verifyCodeHash || !inv.verifyExpiresAt) {
-      return NextResponse.json({ ok: false, error: "not_started" }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "not_started" },
+        { status: 400 }
+      );
     }
     if (new Date(inv.verifyExpiresAt) < now) {
-      return NextResponse.json({ ok: false, error: "otp_expired" }, { status: 410 });
+      return NextResponse.json(
+        { ok: false, error: "otp_expired" },
+        { status: 410 }
+      );
     }
     if (sha256(otp.trim()) !== inv.verifyCodeHash) {
-      await invites.updateOne({ _id: inv._id }, { $inc: { verifyAttempts: 1 } });
-      return NextResponse.json({ ok: false, error: "otp_invalid" }, { status: 401 });
+      await invites.updateOne(
+        { _id: inv._id },
+        { $inc: { verifyAttempts: 1 } }
+      );
+      return NextResponse.json(
+        { ok: false, error: "otp_invalid" },
+        { status: 401 }
+      );
     }
 
     // Verified email (via OTP) is the invite's email
@@ -75,16 +115,22 @@ export async function POST(req: NextRequest) {
     const targetHIdStr = toStringId(inv.householdId);
     const targetHIdObj = toMaybeObjectId(targetHIdStr);
     const household =
-      (targetHIdObj && (await households.findOne({ _id: targetHIdObj }))) ||
+      (targetHIdObj &&
+        (await households.findOne({ _id: targetHIdObj }))) ||
       (await households.findOne({ _id: targetHIdStr as any }));
     if (!household) {
-      return NextResponse.json({ ok: false, error: "household_not_found" }, { status: 404 });
+      return NextResponse.json(
+        { ok: false, error: "household_not_found" },
+        { status: 404 }
+      );
     }
 
     if (sessionUser) {
       // Logged-in flow
       const suId = toStringId(
-        (sessionUser as any)._id ?? (sessionUser as any).id ?? (sessionUser as any).userId
+        (sessionUser as any)._id ??
+          (sessionUser as any).id ??
+          (sessionUser as any).userId
       );
       const suEmail = lc((sessionUser as any).email);
 
@@ -99,19 +145,29 @@ export async function POST(req: NextRequest) {
 
         // ✅ Switch to invited account:
         // create/reuse invited user, replace session, upsert membership, redeem invite
-        let userDoc = await usersCol.findOne({ email: joinEmail });
+        let userDoc =
+          (await usersCol.findOne({
+            email: joinEmail,
+          })) as UserDocLike | null;
+
         if (!userDoc) {
           const tempPassword = randomBytes(16).toString("hex");
-          userDoc = await createUser(joinEmail, tempPassword, "tenant");
+          const created = await createUser(joinEmail, tempPassword, "tenant");
+          userDoc = created as UserDocLike;
         }
 
-        await createSession(userDoc); // overwrite cookie → effectively logs out prior user
+        await createSession(userDoc as any); // overwrite cookie → effectively logs out prior user
+
+        const uId = userIdString(userDoc);
 
         await memberships.updateOne(
-          { userId: toStringId(userDoc._id), householdId: targetHIdObj ?? targetHIdStr },
+          {
+            userId: uId,
+            householdId: targetHIdObj ?? targetHIdStr,
+          },
           {
             $set: {
-              userId: toStringId(userDoc._id),
+              userId: uId,
               email: joinEmail,
               householdId: targetHIdObj ?? targetHIdStr,
               role: inv.role || "co_applicant",
@@ -120,7 +176,7 @@ export async function POST(req: NextRequest) {
             },
             $setOnInsert: {
               joinedAt: now,
-              name: (userDoc as any).preferredName ?? null,
+              name: userDoc.preferredName ?? null,
             },
           },
           { upsert: true }
@@ -132,7 +188,7 @@ export async function POST(req: NextRequest) {
             $set: {
               state: "redeemed",
               redeemedAt: now,
-              redeemedBy: toStringId(userDoc._id),
+              redeemedBy: uId,
               switchedAccount: true, // small audit flag
             },
           }
@@ -148,22 +204,40 @@ export async function POST(req: NextRequest) {
 
       // Same-email, normal logged-in flow
       const activeMem =
-        (await memberships.findOne({ active: true, $or: [{ userId: suId }, { email: suEmail }] })) ||
-        (await membershipsLegacy.findOne({ active: true, $or: [{ userId: suId }, { email: suEmail }] }));
+        (await memberships.findOne({
+          active: true,
+          $or: [{ userId: suId }, { email: suEmail }],
+        })) ||
+        (await membershipsLegacy.findOne({
+          active: true,
+          $or: [{ userId: suId }, { email: suEmail }],
+        }));
 
       if (activeMem) {
         const hId = activeMem.householdId;
         const [cntA, cntB] = await Promise.all([
-          memberships.countDocuments({ householdId: hId, active: { $in: [true, false] } }),
-          membershipsLegacy.countDocuments({ householdId: hId, active: { $in: [true, false] } }),
+          memberships.countDocuments({
+            householdId: hId,
+            active: { $in: [true, false] },
+          }),
+          membershipsLegacy.countDocuments({
+            householdId: hId,
+            active: { $in: [true, false] },
+          }),
         ]);
         if (cntA + cntB > 1) {
-          return NextResponse.json({ ok: false, error: "household_multi_member_block" }, { status: 409 });
+          return NextResponse.json(
+            { ok: false, error: "household_multi_member_block" },
+            { status: 409 }
+          );
         }
       }
 
       await memberships.updateOne(
-        { userId: suId, householdId: targetHIdObj ?? targetHIdStr },
+        {
+          userId: suId,
+          householdId: targetHIdObj ?? targetHIdStr,
+        },
         {
           $set: {
             userId: suId,
@@ -183,27 +257,45 @@ export async function POST(req: NextRequest) {
 
       await invites.updateOne(
         { _id: inv._id },
-        { $set: { state: "redeemed", redeemedAt: now, redeemedBy: suId } }
+        {
+          $set: {
+            state: "redeemed",
+            redeemedAt: now,
+            redeemedBy: suId,
+          },
+        }
       );
 
-      return NextResponse.json({ ok: true, joined: true, createdAccount: false });
+      return NextResponse.json({
+        ok: true,
+        joined: true,
+        createdAccount: false,
+      });
     }
 
     // Logged-out flow → create or reuse user by invite email, then session, then membership
-    let userDoc = await usersCol.findOne({ email: inv.email });
+    let userDoc =
+      (await usersCol.findOne({
+        email: inv.email,
+      })) as UserDocLike | null;
+
     if (!userDoc) {
       const tempPassword = randomBytes(16).toString("hex");
-      userDoc = await createUser(String(inv.email), tempPassword, "tenant");
+      const created = await createUser(String(inv.email), tempPassword, "tenant");
+      userDoc = created as UserDocLike;
     }
 
-    await createSession(userDoc);
+    await createSession(userDoc as any);
+
+    const uId = userIdString(userDoc);
+    const uEmail = userEmailLower(userDoc);
 
     await memberships.updateOne(
-      { userId: toStringId(userDoc._id), householdId: targetHIdObj ?? targetHIdStr },
+      { userId: uId, householdId: targetHIdObj ?? targetHIdStr },
       {
         $set: {
-          userId: toStringId(userDoc._id),
-          email: lc(userDoc.email),
+          userId: uId,
+          email: uEmail,
           householdId: targetHIdObj ?? targetHIdStr,
           role: inv.role || "co_applicant",
           active: true,
@@ -211,7 +303,7 @@ export async function POST(req: NextRequest) {
         },
         $setOnInsert: {
           joinedAt: now,
-          name: (userDoc as any).preferredName ?? null,
+          name: userDoc.preferredName ?? null,
         },
       },
       { upsert: true }
@@ -219,12 +311,25 @@ export async function POST(req: NextRequest) {
 
     await invites.updateOne(
       { _id: inv._id },
-      { $set: { state: "redeemed", redeemedAt: now, redeemedBy: toStringId(userDoc._id) } }
+      {
+        $set: {
+          state: "redeemed",
+          redeemedAt: now,
+          redeemedBy: uId,
+        },
+      }
     );
 
-    return NextResponse.json({ ok: true, joined: true, createdAccount: true });
+    return NextResponse.json({
+      ok: true,
+      joined: true,
+      createdAccount: true,
+    });
   } catch (e) {
     console.error("[join.complete] error", e);
-    return NextResponse.json({ ok: false, error: "server_error" }, { status: 500 });
+    return NextResponse.json(
+      { ok: false, error: "server_error" },
+      { status: 500 }
+    );
   }
 }
