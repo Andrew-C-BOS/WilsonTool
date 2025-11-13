@@ -215,48 +215,109 @@ async function resolveMyMembership(opts: {
 /* ---------- invite email (simple, branded) ---------- */
 function renderInviteEmail(opts: {
   brand?: string;
-  toDisplay?: string;
+  toDisplay?: string;             // email address, we will derive a friendly name
   inviterDisplay?: string;
   householdDisplay?: string | null;
   inviteUrl: string;
   expiresAt: Date;
+  role?: MemberRole;
 }) {
   const brand = opts.brand ?? "MILO";
-  const subject = `${brand} invitation to join a household`;
-  const niceExpires = opts.expiresAt.toLocaleString();
-  const who = opts.inviterDisplay ? ` from ${opts.inviterDisplay}` : "";
-  const hh = opts.householdDisplay ? ` for “${opts.householdDisplay}”` : "";
 
-  const text =
-`${brand} invitation${who}${hh}
+  const inviter = opts.inviterDisplay || `${brand} user`;
+  const householdName = opts.householdDisplay || "your rental application household";
 
-You’ve been invited to join a household${hh}.
-Click this link to accept:
+  // Try to get a friendly display from the email, e.g. "andrew" from "andrew@example.com"
+  const rawTo = opts.toDisplay || "";
+  const toLocalPart = rawTo.includes("@") ? rawTo.split("@")[0] : rawTo;
+  const toGreetingName =
+    toLocalPart && toLocalPart.length > 0 ? toLocalPart.charAt(0).toUpperCase() + toLocalPart.slice(1) : "there";
+
+  const roleLabel =
+    opts.role === "primary"
+      ? "primary applicant"
+      : opts.role === "cosigner"
+      ? "cosigner"
+      : "co-applicant";
+
+  const expiresOnDate = opts.expiresAt.toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+  const expiresOnTime = opts.expiresAt.toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  const niceExpires = `${expiresOnDate} at ${expiresOnTime}`;
+
+  const subjectHouseholdSuffix = opts.householdDisplay ? ` for "${opts.householdDisplay}"` : "";
+  const subject = `${inviter} invited you to join their MILO application household${subjectHouseholdSuffix}`;
+
+  const text = `Hi ${toGreetingName},
+
+${inviter} listed you as a ${roleLabel} in a rental application household on ${brand}${opts.householdDisplay ? ` for "${opts.householdDisplay}"` : ""}.
+
+To review the details, and complete your part of the application, use this secure link,
 ${opts.inviteUrl}
 
 This link expires on ${niceExpires}.
-If you didn’t expect this, you can ignore this email.`;
+
+You received this email because someone entered your address while adding household members to a rental application on ${brand}.
+If you were not expecting this, you can ignore this email, you will not be added to the household unless you use the link.
+
+About ${brand},
+${brand} helps renters and property managers manage rental applications, households, and communication in one place.`;
 
   const html = `<!doctype html>
 <html>
-  <body style="font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial; background:#f8fafc; padding:24px">
-    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:560px; margin:0 auto; background:#ffffff; border:1px solid #e5e7eb; border-radius:12px">
-      <tr><td style="padding:24px">
-        <h1 style="font-size:18px; margin:0 0 8px; color:#111827;">${brand} invitation${who}${hh}</h1>
-        <p style="font-size:14px; color:#374151; margin:0 0 16px;">
-          You’ve been invited to join a household${hh}.
-        </p>
-        <p style="margin:16px 0;">
-          <a href="${opts.inviteUrl}" style="display:inline-block; padding:10px 14px; border-radius:10px; border:1px solid #0f172a; text-decoration:none; font-weight:700; color:#ffffff; background:#0f172a;">
-            Accept invitation
-          </a>
-        </p>
-        <p style="font-size:12px; color:#6b7280; margin:16px 0 0;">
-          This link expires on ${niceExpires}.
-        </p>
-      </td></tr>
+  <body style="font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial; background:#f8fafc; padding:24px;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:560px; margin:0 auto; background:#ffffff; border:1px solid #e5e7eb; border-radius:12px;">
+      <tr>
+        <td style="padding:24px;">
+          <p style="font-size:14px; color:#111827; margin:0 0 12px;">Hi ${toGreetingName},</p>
+
+          <h1 style="font-size:18px; margin:0 0 12px; color:#111827;">
+            ${inviter} invited you to join their ${brand} application household
+            ${opts.householdDisplay ? ` for “${opts.householdDisplay}”` : ""}
+          </h1>
+
+          <p style="font-size:14px; color:#374151; margin:0 0 8px;">
+            You were listed as a <strong>${roleLabel}</strong> in a rental application household on ${brand}.
+          </p>
+
+          <p style="font-size:14px; color:#374151; margin:0 0 16px;">
+            To review the details, confirm your information, and complete any required steps, use the secure button below,
+          </p>
+
+          <p style="margin:16px 0;">
+            <a href="${opts.inviteUrl}" style="display:inline-block; padding:10px 16px; border-radius:10px; border:1px solid #0f172a; text-decoration:none; font-weight:600; color:#ffffff; background:#0f172a;">
+              Open your application
+            </a>
+          </p>
+
+          <p style="font-size:12px; color:#6b7280; margin:8px 0 0;">
+            If the button does not work, you can copy and paste this link into your browser,
+          </p>
+          <p style="font-size:12px; color:#4b5563; margin:4px 0 16px; word-break:break-all;">
+            ${opts.inviteUrl}
+          </p>
+
+          <p style="font-size:12px; color:#6b7280; margin:0 0 4px;">
+            This link expires on <strong>${niceExpires}</strong>.
+          </p>
+
+          <p style="font-size:11px; color:#6b7280; margin:16px 0 0;">
+            You received this email because someone entered your address while adding household members to a rental application on ${brand}.
+            If you were not expecting this, you can safely ignore this email, you will not be added to the household unless you use the link.
+          </p>
+        </td>
+      </tr>
     </table>
-    <p style="text-align:center; font-size:12px; color:#9ca3af; margin-top:16px;">${brand}</p>
+
+    <p style="text-align:center; font-size:11px; color:#9ca3af; margin-top:16px;">
+      ${brand} · Rental applications and household management
+    </p>
   </body>
 </html>`;
 

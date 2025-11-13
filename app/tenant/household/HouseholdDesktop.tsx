@@ -1,7 +1,7 @@
 // app/tenant/household/HouseholdDesktop.tsx
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { HouseholdCluster, MemberRole } from "./HouseholdRouter";
 import Link from "next/link";
@@ -204,6 +204,16 @@ type CreatedInvite = {
   inviteUrl: string;
 };
 
+/** Incoming invites addressed to the current user */
+type IncomingInvite = {
+  id: string;
+  householdName?: string | null;
+  inviterName?: string | null;
+  role: MemberRole;
+  createdAt: string;
+  expiresAt: string;
+};
+
 /* ─────────────────────────────────────────────────────────────
    Component
 ───────────────────────────────────────────────────────────── */
@@ -216,6 +226,7 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
   // modals
   const [inviteOpen, setInviteOpen] = useState(false);
   const [joinOpen, setJoinOpen] = useState(false);
+  const [joinFromInviteOpen, setJoinFromInviteOpen] = useState(false);
 
   // rename household
   const [newName, setNewName] = useState(cluster.displayName || "");
@@ -225,23 +236,28 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
   const [preferredName, setPreferredName] = useState<string>("");
   const [savingPreferred, setSavingPreferred] = useState(false);
 
-  // join
+  // join by code
   const [joinCode, setJoinCode] = useState("");
 
-  // invites
+  // invites (outgoing)
   const [invites, setInvites] = useState<ActiveInvite[]>([]);
   const [creating, setCreating] = useState(false);
   const [newInviteEmail, setNewInviteEmail] = useState("");
   const [newInviteRole, setNewInviteRole] = useState<MemberRole>("co_applicant");
   const [lastCreated, setLastCreated] = useState<CreatedInvite | null>(null);
 
+  // incoming invites (to me, from other households)
+  const [incomingInvites, setIncomingInvites] = useState<IncomingInvite[]>([]);
+  const [incomingLoading, setIncomingLoading] = useState<boolean>(false);
+
   // leave
   const [leaving, setLeaving] = useState(false);
 
   const memberCount = cluster.members.length;
-  const canJoin = memberCount <= 1; // cannot join if household has >1 member
-  const canLeave = memberCount > 1; // can only leave if someone else remains
+  const canJoin = memberCount <= 1;
+  const canLeave = memberCount > 1;
   const headerName = cluster.displayName ?? "Untitled household";
+  const hasIncomingInvites = incomingInvites.length > 0;
 
   function flash(msg: string) {
     setToast(msg);
@@ -269,6 +285,23 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
       setInvites(json.invites as ActiveInvite[]);
     } catch (e) {
       console.error("invite list error", e);
+    }
+  }
+
+  async function fetchIncomingInvites() {
+    setIncomingLoading(true);
+    try {
+      const res = await fetch("/api/tenant/household/invites/incoming?me=1", {
+        cache: "no-store",
+      });
+      const json = await res.json();
+      if (!json?.ok) throw new Error(json?.error || "error");
+      setIncomingInvites(json.invites as IncomingInvite[]);
+    } catch (e) {
+      console.error("incoming invite list error", e);
+      setIncomingInvites([]);
+    } finally {
+      setIncomingLoading(false);
     }
   }
 
@@ -310,6 +343,7 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
     }
   }
 
+  // Join by code (email link, "Join with a code")
   async function redeemInvite(code: string) {
     setBusy(true);
     try {
@@ -323,12 +357,40 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
       flash("Joined,");
       router.refresh();
     } catch (e: any) {
+      const msg = e?.message || "redeem_failed";
       const reason =
-        e?.message === "wrong_email"
+        msg === "wrong_email"
           ? "wrong email for this code,"
-          : e?.message === "invalid_or_expired"
+          : msg === "invalid_or_expired"
           ? "invalid or expired code,"
-          : e?.message || "error,";
+          : msg || "error,";
+      flash(`Couldn’t join, ${reason}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Join by inviteId (Join-from-invite modal)
+  async function redeemInviteById(inviteId: string) {
+    setBusy(true);
+    try {
+      const res = await fetch("/api/tenant/household/invites/redeem", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ inviteId }),
+      });
+      const json = await res.json();
+      if (!json?.ok) throw new Error(json?.error || "redeem_failed");
+      flash("Joined,");
+      router.refresh();
+    } catch (e: any) {
+      const msg = e?.message || "redeem_failed";
+      const reason =
+        msg === "wrong_email"
+          ? "wrong email for this invite,"
+          : msg === "invalid_or_expired"
+          ? "invalid or expired invite,"
+          : msg || "error,";
       flash(`Couldn’t join, ${reason}`);
     } finally {
       setBusy(false);
@@ -383,10 +445,11 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
     }
   }
 
-  // NEW: leave household
   async function leaveHousehold() {
     if (!canLeave) return;
-    const confirmed = window.confirm("Are you sure you want to leave this household?");
+    const confirmed = window.confirm(
+      "Are you sure you want to leave this household? You’ll be unlinked from the other members,"
+    );
     if (!confirmed) return;
 
     setLeaving(true);
@@ -394,14 +457,11 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
       const res = await fetch("/api/tenant/household/leave", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        // If you want to force a specific household id, pass it here:
-        // body: JSON.stringify({ householdId: cluster.id }),
         body: JSON.stringify({}),
       });
       const json = await res.json();
       if (!res.ok || !json?.ok) throw new Error(json?.error || "leave_failed");
       flash("Left household,");
-      // Send the user to a safe landing, then refresh
       router.replace("/tenant");
       router.refresh();
     } catch (e: any) {
@@ -415,9 +475,16 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
     }
   }
 
+  async function handleJoinFromInvite(inviteId: string) {
+    setJoinFromInviteOpen(false);
+    await redeemInviteById(inviteId);
+    fetchIncomingInvites();
+  }
+
   useEffect(() => {
     fetchInvites();
-    // Optionally hydrate preferredName:
+    fetchIncomingInvites();
+    // Optionally hydrate preferredName from cluster:
     // setPreferredName(cluster.me?.preferredName ?? "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -440,7 +507,7 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
         </div>
 
         <p className="mt-3 text-gray-600">
-          Invite members, join with a code, set your preferred name, rename the household, or, leave the household,
+          Invite members, join with a code, join from an invite, set your preferred name, rename the household, or, leave the household,
         </p>
 
         <div className="mt-4 flex flex-wrap gap-2">
@@ -461,11 +528,26 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
             title={
               canJoin
                 ? "Join with a code,"
-                : "You can’t join another household while yours has more than one member,"
+                : "You can’t join another household with a code while yours has more than one member,"
             }
           >
             <LinkIcon className="mr-2 h-4 w-4" />
             Join with a code
+          </GhostButton>
+
+          <GhostButton
+            onClick={() => setJoinFromInviteOpen(true)}
+            disabled={!hasIncomingInvites}
+            title={
+              hasIncomingInvites
+                ? "Join a household you’ve been invited to,"
+                : incomingLoading
+                ? "Checking for invites…"
+                : "No active invites found for your email,"
+            }
+          >
+            <Users className="mr-2 h-4 w-4" />
+            Join from invite
           </GhostButton>
         </div>
       </header>
@@ -477,7 +559,7 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
           titleIcon={<Users className="text-indigo-500" />}
           badgeText={`${memberCount} total`}
         >
-          {/* Preferred name editor (for YOU) */}
+          {/* Preferred name editor */}
           <div className="mb-4 rounded-lg border border-gray-200 bg-white p-3">
             <div className="flex items-center gap-2">
               <UserCircle2 className="h-5 w-5 text-indigo-500" />
@@ -529,7 +611,7 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
           </div>
         </Card>
 
-        {/* Invites */}
+        {/* Invites (outgoing) */}
         <Card
           title="Household invites"
           titleIcon={<UserPlus className="text-indigo-500" />}
@@ -564,7 +646,11 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
                     <button
                       className="inline-flex items-center rounded-md border border-gray-300 bg-white px-2 py-1 text-xs hover:bg-gray-100"
                       onClick={() => copy(inv.inviteUrlTemplate ?? "")}
-                      title={inv.inviteUrlTemplate ? "Copies a link template, create a fresh invite for a full link," : "Create a new invite to get a full link,"}
+                      title={
+                        inv.inviteUrlTemplate
+                          ? "Copies a link template, create a fresh invite for a full link,"
+                          : "Create a new invite to get a full link,"
+                      }
                     >
                       <CopyIcon className="mr-1 h-3.5 w-3.5" />
                       Copy link
@@ -606,7 +692,7 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
           </div>
         </Card>
 
-        {/* Leave household (guarded) */}
+        {/* Leave household */}
         <Card title="Leave household" titleIcon={<ShieldCheck className="text-indigo-500" />} tone="emphasis">
           <p className="text-sm text-gray-600">
             You’ll be unlinked from this household cluster,
@@ -617,7 +703,11 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
               disabled={!canLeave || leaving}
               tone="rose"
             >
-              {leaving ? "Leaving…" : (<><LogOut className="mr-2 h-4 w-4" /> Leave household</>)}
+              {leaving ? "Leaving…" : (
+                <>
+                  <LogOut className="mr-2 h-4 w-4" /> Leave household
+                </>
+              )}
             </PrimaryButton>
             {!canLeave && (
               <p className="mt-2 text-xs text-gray-500">
@@ -628,7 +718,7 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
         </Card>
       </section>
 
-      {/* Invite modal */}
+      {/* Invite modal (outgoing) */}
       <Modal open={inviteOpen} title="Share household invite" onClose={() => setInviteOpen(false)}>
         <div className="space-y-4">
           {/* Create new invite */}
@@ -716,7 +806,11 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
                       <button
                         className="inline-flex items-center rounded-md border border-gray-300 bg-white px-2 py-1 text-xs hover:bg-gray-100"
                         onClick={() => copy(inv.inviteUrlTemplate ?? "")}
-                        title={inv.inviteUrlTemplate ? "Copies a link template, create a fresh invite for a full link," : "Create a new invite to get a full link,"}
+                        title={
+                          inv.inviteUrlTemplate
+                            ? "Copies a link template, create a fresh invite for a full link,"
+                            : "Create a new invite to get a full link,"
+                        }
                       >
                         <CopyIcon className="mr-1 h-3.5 w-3.5" />
                         Copy link
@@ -741,7 +835,7 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
         </div>
       </Modal>
 
-      {/* Join modal */}
+      {/* Join-with-code modal */}
       <Modal open={joinOpen} title="Join a household with a code" onClose={() => setJoinOpen(false)}>
         <div className="space-y-3">
           <input
@@ -767,9 +861,64 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
           </div>
           {!canJoin && (
             <p className="text-xs text-gray-500">
-              You can’t join another household while yours has more than one member,
+              You can’t join another household with a code while yours has more than one member,
             </p>
           )}
+        </div>
+      </Modal>
+
+      {/* Join-from-invite modal */}
+      <Modal
+        open={joinFromInviteOpen}
+        title="Join a household from an invite"
+        onClose={() => setJoinFromInviteOpen(false)}
+      >
+        <div className="space-y-3">
+          {memberCount > 1 && (
+            <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              <strong className="font-semibold">Heads up,</strong>{" "}
+              you’re currently in a household with {memberCount} members,
+              joining a different household will move you out of this one, and,
+              your existing household members will no longer be linked to you in MILO,
+            </div>
+          )}
+
+          {incomingLoading ? (
+            <p className="text-sm text-gray-600">Looking for invites tied to your account…</p>
+          ) : incomingInvites.length === 0 ? (
+            <p className="text-sm text-gray-600">No active invites found for your email,</p>
+          ) : (
+            <div className="space-y-2">
+              {incomingInvites.map((inv) => (
+                <div
+                  key={inv.id}
+                  className="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-3 py-2"
+                >
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium text-gray-900">
+                      {inv.householdName || "Application household"}
+                    </div>
+                    <div className="text-xs text-gray-600">
+                      Role: {inv.role.replace("_", " ")},{" "}
+                      Invited by: {inv.inviterName || "someone"},{" "}
+                      Expires: {new Date(inv.expiresAt).toLocaleString()}
+                    </div>
+                  </div>
+                  <PrimaryButton
+                    tone="indigo"
+                    disabled={busy}
+                    onClick={() => handleJoinFromInvite(inv.id)}
+                  >
+                    Join
+                  </PrimaryButton>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <p className="text-xs text-gray-500">
+            Joining from an invite will switch your active household to the one you select,
+          </p>
         </div>
       </Modal>
 
