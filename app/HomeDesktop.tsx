@@ -1,6 +1,8 @@
 // app/page.tsx
 import Link from "next/link";
 
+const PUBLIC_HERO_VIDEO_URL= "https://mini-milo-bucket.s3.amazonaws.com/Public/hero.mp4"
+
 export default function Home() {
   // Compute once on the server; avoids any client-time drift.
   const year = new Date().getUTCFullYear();
@@ -23,7 +25,7 @@ export default function Home() {
           preload="auto"
           className="h-full w-full object-cover"
         >
-          <source src="/hero.mp4" type="video/mp4" />
+          <source src={PUBLIC_HERO_VIDEO_URL} type="video/mp4" />
         </video>
       </div>
 
@@ -49,18 +51,19 @@ export default function Home() {
                 </p>
 
 <div className="mt-10 flex flex-col items-stretch gap-4 sm:items-center sm:w-full max-w-xs mx-auto">
-  <Link
-    href="/register"
-    className="min-w-[250px] inline-flex items-center justify-center rounded-full bg-blue-600 px-6 py-3 text-base font-semibold text-white shadow-md ring-1 ring-inset ring-blue-500/30 transition-all hover:-translate-y-0.5 hover:bg-blue-700 hover:shadow-lg active:translate-y-0"
-  >
-    Create account
-  </Link>
-  <Link
-    href="/login"
-    className="min-w-[250px] inline-flex items-center justify-center rounded-full border border-white/30 bg-white/10 px-6 py-3 text-base font-medium text-gray-700 backdrop-blur-md transition-all hover:bg-white/20 hover:-translate-y-0.5 hover:shadow-md active:translate-y-0"
-  >
-    Log in
-  </Link>
+<Link
+  href={{ pathname: "/register", query: { mode: "signup" } }}
+  className="min-w-[250px] inline-flex items-center justify-center rounded-full bg-blue-600 px-6 py-3 text-base font-semibold text-white shadow-md ring-1 ring-inset ring-blue-500/30 transition-all hover:-translate-y-0.5 hover:bg-blue-700 hover:shadow-lg active:translate-y-0"
+>
+  Create account
+</Link>
+
+<Link
+  href={{ pathname: "/register", query: { mode: "signin" } }}
+  className="min-w-[250px] inline-flex items-center justify-center rounded-full border border-white/30 bg-white/10 px-6 py-3 text-base font-medium text-gray-700 backdrop-blur-md transition-all hover:bg-white/20 hover:-translate-y-0.5 hover:shadow-md active:translate-y-0"
+>
+  Log in
+</Link>
 </div>
 
                 <div className="mt-10 grid gap-8 text-sm sm:grid-cols-1">

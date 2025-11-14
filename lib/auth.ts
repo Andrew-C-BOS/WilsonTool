@@ -38,13 +38,40 @@ export async function findUserByEmail(email: string) {
     .findOne<{ _id: any; email: string; passwordHash: string; role: Role; isAdmin?: boolean }>({ email });
 }
 
-export async function createUser(email: string, password: string, role: Role) {
+export async function createUser(
+  email: string,
+  password: string,
+  role: Role,
+  legalName?: string
+) {
   const db = await getDb();
-  if (await db.collection("users").findOne({ email })) throw new Error("Email already in use");
+
+  if (await db.collection("users").findOne({ email })) {
+    throw new Error("Email already in use");
+  }
+
   const passwordHash = await bcrypt.hash(password, 10);
+
   // If role is explicitly "admin", that implies admin; otherwise allow-list can still grant admin
   const isAdmin = role === "admin" || ADMIN_EMAILS.includes(email.toLowerCase());
-  const res = await db.collection("users").insertOne({ email, passwordHash, role, isAdmin, createdAt: new Date() });
+
+  const doc: any = {
+    email,
+    passwordHash,
+    role,
+    isAdmin,
+    createdAt: new Date(),
+  };
+
+  // For tenants, persist the legal name your deposit flows need
+  if (role === "tenant" && legalName) {
+    doc.legal_name = legalName; // ← snake_case as requested
+  }
+
+  const res = await db.collection("users").insertOne(doc);
+
+  // You can extend SessionUser later if you want legal_name on the session;
+  // for now we keep the existing return shape.
   return { _id: String(res.insertedId), email, role, isAdmin } as SessionUser;
 }
 

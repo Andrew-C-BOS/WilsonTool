@@ -2,6 +2,8 @@
 import Link from "next/link";
 import { useState, useEffect } from "react";
 
+const PUBLIC_HERO_VIDEO_URL= "https://mini-milo-bucket.s3.amazonaws.com/Public/hero.mp4"
+
 export default function HomeMobile() {
   // Pre-render stable year (avoid hydration mismatch)
   const [year] = useState(() => 2025);
@@ -24,7 +26,7 @@ export default function HomeMobile() {
             preload="metadata"
             className="h-full w-full object-cover"
           >
-            <source src="/hero.mp4" type="video/mp4" />
+            <source src={PUBLIC_HERO_VIDEO_URL} type="video/mp4" />
           </video>
         </div>
       )}

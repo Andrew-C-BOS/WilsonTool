@@ -6,15 +6,33 @@ import { ensureSoloHousehold } from "@/lib/households"; // <-- new
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+
 export async function POST(req: Request) {
   try {
-    const { email, password, role } = await req.json();
+    const { email, password, role, fullName } = await req.json();
+
     if (!email || !password || !["tenant", "landlord"].includes(role)) {
-      return NextResponse.json({ ok: false, error: "Invalid body" }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "Invalid body" },
+        { status: 400 }
+      );
     }
 
-    // 1) create the user
-    const user = await createUser(email, password, role);
+    // For tenants, require a legal name and normalize it
+    let legalName: string | undefined;
+    if (role === "tenant") {
+      legalName = (fullName ?? "").trim();
+      if (!legalName) {
+        return NextResponse.json(
+          { ok: false, error: "fullName_required_for_tenant" },
+          { status: 400 }
+        );
+      }
+    }
+
+    // 1) create the user (now with legal_name for tenants)
+    const user = await createUser(email, password, role, legalName);
+
 
     // 2) if tenant, ensure they have a solo household immediately
     //    this guarantees your invariant, one active household per user, always,
