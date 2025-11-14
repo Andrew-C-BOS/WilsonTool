@@ -63,18 +63,19 @@ export default function HomeMobile() {
 
     {/* CTAs */}
     <div className="mt-6 flex flex-col items-stretch gap-3 w-full max-w-xs mx-auto">
-      <Link
-        href="/register"
-        className="inline-flex items-center justify-center rounded-full bg-blue-600 px-5 py-3 text-base font-semibold text-white shadow-md ring-1 ring-inset ring-blue-500/30 transition-all hover:-translate-y-0.5 hover:bg-blue-700 hover:shadow-lg active:translate-y-0"
-      >
-        Create account
-      </Link>
-      <Link
-        href="/login"
-        className="inline-flex items-center justify-center rounded-full border border-white/30 bg-white/10 px-5 py-3 text-base font-medium text-gray-800 backdrop-blur-md transition-all hover:bg-white/20 hover:-translate-y-0.5 hover:shadow-md active:translate-y-0"
-      >
-        Log in
-      </Link>
+<Link
+  href={{ pathname: "/register", query: { mode: "signup" } }}
+  className="min-w-[250px] inline-flex items-center justify-center rounded-full bg-blue-600 px-6 py-3 text-base font-semibold text-white shadow-md ring-1 ring-inset ring-blue-500/30 transition-all hover:-translate-y-0.5 hover:bg-blue-700 hover:shadow-lg active:translate-y-0"
+>
+  Create account
+</Link>
+
+<Link
+  href={{ pathname: "/register", query: { mode: "signin" } }}
+  className="min-w-[250px] inline-flex items-center justify-center rounded-full border border-white/30 bg-white/10 px-6 py-3 text-base font-medium text-gray-700 backdrop-blur-md transition-all hover:bg-white/20 hover:-translate-y-0.5 hover:shadow-md active:translate-y-0"
+>
+  Log in
+</Link>
     </div>
 
     {/* Value props */}
