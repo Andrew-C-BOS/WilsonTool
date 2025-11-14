@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { Suspense, useState, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 const LOGIN_HERO_URL =
@@ -8,7 +8,22 @@ const LOGIN_HERO_URL =
 
 type Mode = "signin" | "signup";
 
+
 export default function AuthPage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="flex min-h-screen items-center justify-center bg-slate-950 text-slate-100">
+          <div className="text-sm text-slate-300">Loading…</div>
+        </main>
+      }
+    >
+      <AuthContent />
+    </Suspense>
+  );
+}
+
+function AuthContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
