@@ -1,7 +1,9 @@
+// app/tenant/page.tsx
 import { Suspense } from "react";
+import { redirect } from "next/navigation";
 import { getSessionUser } from "@/lib/auth";
-import { getTenantHomeState } from "@/lib/tenant/nextAction";
 import TenantRouter from "./TenantRouter";
+import { buildTenantHomeState } from "@/lib/tenant/homeViewState";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -9,13 +11,21 @@ export const revalidate = 0;
 
 export default async function Page() {
   const user = await getSessionUser();
-  const state = user?._id ? await getTenantHomeState(String(user._id)) : null;
+
+  // If not logged in or not a tenant, kick them out
+  if (!user || user.role !== "tenant") {
+    redirect("/login"); // or "/" or wherever you want
+  }
+
+  const state = await buildTenantHomeState({
+    _id: user._id,
+    email: user.email,
+  });
 
   return (
-    <Suspense fallback={<div className="text-gray-600 text-sm px-4">Loading…</div>}>
+    <Suspense fallback={<div>Loading…</div>}>
       <TenantRouter
-        user={{ email: user?.email ?? null }}
-        // For now we only use this on Desktop, Router just forwards it.
+        user={{ email: user.email }}
         state={state}
       />
     </Suspense>

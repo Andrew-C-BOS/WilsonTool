@@ -20,11 +20,30 @@ const dateFmt = new Intl.DateTimeFormat(undefined, {
   month: "short",
   day: "numeric",
 });
-const toDate = (s?: string | null) => (s ? new Date(s) : null);
+const toDate = (s?: string | null) => {
+  if (!s) return null;
+  const str = String(s);
+
+  // Always pull out the calendar part if it looks like YYYY-MM-DD...
+  const m = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) {
+    const [, y, mm, d] = m;
+    return new Date(Number(y), Number(mm) - 1, Number(d)); // local calendar date
+  }
+
+  // Fallback for weird formats
+  const d2 = new Date(str);
+  return Number.isNaN(d2.getTime()) ? null : d2;
+};
 const asMoney = (cents?: number | null) => moneyFmt.format((cents ?? 0) / 100);
 
-/* Hard target for payments portal */
-const PAYMENTS_URL = "http://localhost:3000/tenant/payments";
+/* date helpers */
+function addMonths(d: Date, months: number) {
+  return new Date(d.getFullYear(), d.getMonth() + months, d.getDate());
+}
+
+/* Hard target for payments portal (relative path only) */
+const PAYMENTS_URL = "/tenant/payments";
 
 /* ------- status pill ------- */
 function StatusPill({ status }: { status: string }) {
@@ -47,7 +66,7 @@ function StatusPill({ status }: { status: string }) {
     <span
       className={clsx(
         "inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-medium ring-1 ring-inset",
-        map[tone]
+        map[tone],
       )}
     >
       {status.replace("_", " ")}
@@ -88,7 +107,7 @@ function PaymentsLink({
         data-testid={dataTestId}
         className={
           className ??
-          "inline-flex items-center rounded-md bg-blue-600 px-3 py-2 text-xs font-medium text-white hover:bg-blue-700"
+          "inline-flex items-center justify-center rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white shadow-sm hover:bg-blue-700"
         }
       >
         {children}
@@ -118,7 +137,7 @@ type DisclosureSummary = {
 
 const fetchDisclosureSummary = async (
   appId: string,
-  firmId?: string | null
+  firmId?: string | null,
 ): Promise<DisclosureSummary | null> => {
   const qs = new URLSearchParams({ appId });
   if (firmId) qs.set("firmId", firmId);
@@ -134,8 +153,8 @@ type LandlordDoc = {
   id: string;
   title: string;
   externalDescription?: string | null;
-  url?: string | null;   // present in API payload, but we route via our API
-  s3Key?: string | null; // present in API payload
+  url?: string | null;
+  s3Key?: string | null;
 };
 
 /* ------- main ------- */
@@ -164,6 +183,9 @@ export default function LeaseDesktop({
     return raw;
   });
 
+  // payment calendar toggle
+  const [showCalendar, setShowCalendar] = useState(false);
+
   // Lease ID for document download routes
   const leaseId = useMemo(() => {
     const raw = (lease as any)?._id ?? (lease as any)?.id;
@@ -177,7 +199,6 @@ export default function LeaseDesktop({
     if (a) {
       setResolvedAppId(String(a));
       if (f) setResolvedFirmId(String(f));
-      // docs may already be on the lease prop
       if (Array.isArray((lease as any).documents)) {
         setLandlordDocs(((lease as any).documents ?? []) as LandlordDoc[]);
       }
@@ -193,13 +214,11 @@ export default function LeaseDesktop({
         const j = await res.json().catch(() => null);
         const all: any[] = j?.leases?.all ?? [];
         const me = all.find(
-          (x) => String(x?._id) === String((lease as any)?._id)
+          (x) => String(x?._id) === String((lease as any)?._id),
         );
         if (!abort && me) {
           if (me.appId) setResolvedAppId(String(me.appId));
           if (me.firmId) setResolvedFirmId(String(me.firmId));
-
-          // pull normalized documents (with S3 info) from the API payload
           if (Array.isArray(me.documents)) {
             setLandlordDocs(me.documents as LandlordDoc[]);
           }
@@ -221,14 +240,13 @@ export default function LeaseDesktop({
   }
 
   async function toggleChecklist(key: string, done: boolean) {
-    // optimistic
     const prev = lease;
     const next: LeaseDoc = {
       ...prev,
       checklist: (prev.checklist ?? []).map((it) =>
         it.key === key
           ? { ...it, completedAt: done ? new Date().toISOString() : null }
-          : it
+          : it,
       ),
     };
     onLeaseUpdated(next);
@@ -258,8 +276,8 @@ export default function LeaseDesktop({
     setDiscOpen(true);
   }
 
-  const moveIn = toDate(lease.startDate);
-  const moveOut = toDate(lease.endDate);
+  const moveIn = toDate((lease as any).moveInDate ?? lease.startDate ?? null);
+  const moveOut = toDate((lease as any).moveOutDate ?? lease.endDate ?? null);
 
   const addressLines = useMemo(() => {
     const a = lease.address || ({} as any);
@@ -285,376 +303,661 @@ export default function LeaseDesktop({
 
   const paymentFiles = lease.files ?? [];
 
+  const buildingLine1 =
+    (lease as any)?.building?.addressLine1 ??
+    lease.address?.addressLine1 ??
+    "Your lease";
+
+  const unitLabel =
+    (lease as any)?.unitNumber ??
+    (lease as any)?.unit?.unitNumber ??
+    lease.unitLabel ??
+    "";
+
+  // Tenant members for Parties card
+  const tenantMembers = ((lease as any).tenantMembers ?? []) as {
+    userId?: string | null;
+    role?: string | null;
+    email?: string | null;
+    legalName?: string | null;
+    displayName?: string | null;
+  }[];
+
+  // Payment plan → premium calendar rows
+  const paymentPlan = (lease as any).paymentPlan as
+    | {
+        monthlyRentCents?: number;
+        termMonths?: number;
+        startDate?: string;
+        securityCents?: number;
+        upfrontTotals?: {
+          firstCents?: number;
+          lastCents?: number;
+          keyCents?: number;
+          securityCents?: number;
+          otherUpfrontCents?: number;
+          totalUpfrontCents?: number;
+        };
+      }
+    | undefined;
+
+  const paymentCalendar = useMemo(() => {
+    if (!paymentPlan) return [];
+
+    const term = paymentPlan.termMonths ?? 0;
+    const rentCents = paymentPlan.monthlyRentCents ?? lease.rentCents ?? 0;
+    const start = toDate(paymentPlan.startDate ?? lease.startDate);
+    if (!start || term <= 0 || rentCents <= 0) return [];
+
+    const rows: {
+      label: string;
+      due: Date | null;
+      amountCents: number;
+      kind: "upfront" | "deposit" | "rent";
+    }[] = [];
+
+    // Upfront / deposit row from plan if present
+    const securityCents = paymentPlan.securityCents ?? 0;
+    if (securityCents > 0) {
+      rows.push({
+        label: "Security deposit",
+        due: moveIn ?? start,
+        amountCents: securityCents,
+        kind: "deposit",
+      });
+    }
+
+    // Monthly rent rows
+    for (let i = 0; i < term; i++) {
+      const dueDate = addMonths(start, i);
+      rows.push({
+        label: `Month ${i + 1} rent`,
+        due: dueDate,
+        amountCents: rentCents,
+        kind: "rent",
+      });
+    }
+
+    return rows;
+  }, [paymentPlan, lease.rentCents, lease.startDate, moveIn]);
+
   return (
-    <div className="mx-auto max-w-6xl p-6 grid grid-cols-12 gap-8">
-      {/* Summary */}
-      <section className="col-span-12 lg:col-span-7 space-y-4">
-        <Card
-          title="Lease summary"
-          right={<StatusPill status={lease.status || "scheduled"} />}
-        >
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Info label="Unit / Rent">
-              <div className="leading-6">
-                <div className="font-medium">{lease.unitLabel ?? "—"}</div>
-                <div className="text-gray-700">
-                  {asMoney(lease.rentCents)} / month
+    <main className="min-h-[calc(100vh-4rem)] bg-[#e6edf1]">
+      <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6 lg:px-8">
+        {/* Big shell card, similar to tenant home */}
+        <div className="rounded-3xl bg-[#f4fafc] p-6 shadow-[0_18px_45px_rgba(15,23,42,0.16)] sm:p-7 lg:p-8">
+          {/* Header */}
+          <header className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <div className="inline-flex items-center gap-3 rounded-full bg-slate-100 px-3 py-1">
+                {/* Dark side: building chip */}
+                <span className="inline-flex items-center justify-center rounded-full bg-slate-900 px-3 py-1 text-[11px] font-semibold text-white">
+                  {buildingLine1}
+                </span>
+                {/* Light side: unit label */}
+                <div className="text-xs font-medium text-slate-600">
+                  {unitLabel ? `Unit ${unitLabel}` : "Lease"}
                 </div>
               </div>
-            </Info>
-
-            <Info label="Term">
-              {moveIn ? dateFmt.format(moveIn) : "—"}{" "}
-              <span className="text-gray-400">→</span>{" "}
-              {moveOut ? dateFmt.format(moveOut) : "open-ended"}
-            </Info>
-
-            <Info label="Parties">
-              <div className="leading-6">
-                <div>Tenant, {lease.parties?.tenantName ?? "—"}</div>
-                <div>Landlord, {lease.parties?.landlordName ?? "—"}</div>
-              </div>
-            </Info>
-
-            <Info label="Deposit">
-              {lease.depositCents != null ? asMoney(lease.depositCents) : "—"}
-            </Info>
-
-            <Info className="sm:col-span-2" label="Address">
-              {addressLines}
-            </Info>
-          </div>
-        </Card>
-
-        {/* Payments entry point */}
-        <Card title="Payments">
-          <div className="flex items-center justify-between gap-3">
-            <p className="text-sm text-gray-700">
-              View and complete your up-front and monthly payments.
-            </p>
-
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={openDisclosure}
-                disabled={!canQueryDisclosure}
-                className={clsx(
-                  "inline-flex items-center rounded-md px-3 py-2 text-xs font-medium",
-                  canQueryDisclosure
-                    ? "bg-emerald-600 text-white hover:bg-emerald-700"
-                    : "bg-gray-200 text-gray-500 cursor-not-allowed"
-                )}
-                title={
-                  canQueryDisclosure
-                    ? "View Security Deposit Disclosure"
-                    : "Disclosure available after app & firm are resolved"
-                }
-              >
-                Deposit Disclosure
-              </button>
-
-              <PaymentsLink
-                appId={resolvedAppId}
-                firmId={resolvedFirmId}
-                className="inline-flex items-center rounded-md bg-blue-600 px-3 py-2 text-xs font-medium text-white hover:bg-blue-700"
-                data-testid="open-payments-main"
-              >
-                Open Payments
-              </PaymentsLink>
-            </div>
-          </div>
-        </Card>
-
-        {/* Files / Documents */}
-<Card title="Lease documents">
-  {landlordDocs.length === 0 && paymentFiles.length === 0 ? (
-    <Empty hint="No documents shared yet," />
-  ) : (
-    <div className="space-y-6">
-      {landlordDocs.length > 0 && (
-        <section>
-          <div className="mb-2 flex items-center justify-between">
-            <div>
-              <p className="text-[11px] font-medium uppercase tracking-wide text-gray-500">
-                Shared by your landlord
-              </p>
-              <p className="text-xs text-gray-500">
-                Lease documents and required disclosures
+              <h1 className="mt-3 text-xl font-semibold text-slate-900 sm:text-2xl">
+                My lease
+              </h1>
+              <p className="mt-1 text-xs text-slate-600">
+                View your lease details, manage payments, and stay on top of
+                your move-in checklist.
               </p>
             </div>
-          </div>
 
-          <div className="space-y-2">
-            {landlordDocs.map((doc) => {
-              const href = leaseId
-                ? `/api/tenant/lease/document?leaseId=${encodeURIComponent(
-                    leaseId
-                  )}&docId=${encodeURIComponent(doc.id)}`
-                : "#";
-
-              const isDisabled = !leaseId;
-
-              const Tag: any = isDisabled ? "div" : "a";
-
-              return (
-                <Tag
-                  key={doc.id}
-                  href={isDisabled ? undefined : href}
-                  target={isDisabled ? undefined : "_blank"}
-                  rel={isDisabled ? undefined : "noreferrer"}
-                  aria-disabled={isDisabled || undefined}
-                  className={clsx(
-                    "group flex items-center justify-between rounded-lg border px-3.5 py-3 text-sm shadow-sm transition",
-                    "bg-gray-50/80 border-gray-200",
-                    !isDisabled &&
-                      "hover:border-blue-200 hover:bg-blue-50/70 hover:shadow-md",
-                    isDisabled && "cursor-not-allowed opacity-60"
-                  )}
+            <div className="flex flex-col items-end gap-2 text-right">
+              <div className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1 text-[11px] font-medium text-slate-600 ring-1 ring-slate-200 shadow-sm">
+                <svg
+                  aria-hidden="true"
+                  viewBox="0 0 20 20"
+                  className="h-3.5 w-3.5 text-slate-500"
                 >
-                  <div className="flex min-w-0 items-center gap-3">
-                    {/* File icon */}
-                    <div className="flex h-9 w-9 flex-none items-center justify-center rounded-md bg-white shadow-sm ring-1 ring-gray-100 group-hover:bg-blue-600 group-hover:text-white group-hover:ring-blue-500 transition">
-                      <svg
-                        aria-hidden="true"
-                        viewBox="0 0 20 20"
-                        className="h-4 w-4"
-                      >
-                        <path
-                          d="M5 2.75A1.75 1.75 0 0 1 6.75 1h4.19c.46 0 .9.18 1.23.51l2.32 2.32c.33.33.51.77.51 1.23v11.19A1.75 1.75 0 0 1 13.25 18h-6.5A1.75 1.75 0 0 1 5 16.25v-13.5Z"
-                          fill="currentColor"
-                        />
-                        <path
-                          d="M11.5 1.5V4a1 1 0 0 0 1 1h2.5"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="1.2"
-                          strokeLinecap="round"
-                        />
-                      </svg>
-                    </div>
-
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <p className="truncate font-medium text-gray-900 group-hover:text-blue-800">
-                          {doc.title}
-                        </p>
-                        <span className="inline-flex items-center rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-blue-700">
-                          PDF
-                        </span>
-                      </div>
-                      {doc.externalDescription && (
-                        <p className="mt-0.5 line-clamp-2 text-xs text-gray-500">
-                          {doc.externalDescription}
-                        </p>
-                      )}
-                    </div>
-                  </div>
-
-                  {!isDisabled && (
-                    <div className="ml-3 flex flex-none items-center gap-1 text-[11px] font-medium text-blue-700 group-hover:text-blue-800">
-                      <span>Open</span>
-                      <svg
-                        aria-hidden="true"
-                        viewBox="0 0 20 20"
-                        className="h-3.5 w-3.5"
-                      >
-                        <path
-                          d="M7.25 4.5h8.25m0 0v8.25m0-8.25L9 11.25"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="1.4"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        />
-                      </svg>
-                    </div>
-                  )}
-                </Tag>
-              );
-            })}
-          </div>
-        </section>
-      )}
-
-      {paymentFiles.length > 0 && (
-        <section>
-          <div className="mb-2 flex items-center justify-between">
-            <div>
-              <p className="text-[11px] font-medium uppercase tracking-wide text-gray-500">
-                Additional files
-              </p>
-              <p className="text-xs text-gray-500">
-                Receipts, payment confirmations, and other uploads
-              </p>
+                  <path
+                    d="M4 8.5V7a6 6 0 1 1 12 0v1.5M5 9h10l-.7 7.02A1.5 1.5 0 0 1 12.8 17H7.2a1.5 1.5 0 0 1-1.49-1.35L5 9Z"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.3"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+                <span className="leading-none">
+                  Handled securely through MILO
+                </span>
+              </div>
             </div>
-          </div>
+          </header>
 
-          <div className="space-y-2">
-            {paymentFiles.map((f) => (
-              <a
-                key={f.url}
-                href={f.url}
-                target="_blank"
-                rel="noreferrer"
-                className="group flex items-center justify-between rounded-lg border border-gray-200 bg-white px-3.5 py-3 text-sm shadow-sm transition hover:border-blue-200 hover:bg-blue-50/60 hover:shadow-md"
+          {/* Optional top banner inside shell */}
+          {moveIn && (
+            <div className="mb-6 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800">
+              Lease starts {dateFmt.format(moveIn)}. Make sure payments and
+              checklist items are completed before move-in.
+            </div>
+          )}
+
+          {/* Main grid */}
+          <div className="grid grid-cols-12 gap-6 lg:gap-8">
+            {/* Summary + payments + docs */}
+            <section className="col-span-12 lg:col-span-7 space-y-4">
+              <Card
+                title="Lease summary"
+                right={<StatusPill status={lease.status || "scheduled"} />}
               >
-                <div className="flex min-w-0 items-center gap-3">
-                  <div className="flex h-8 w-8 flex-none items-center justify-center rounded-md bg-gray-50 text-gray-500 ring-1 ring-gray-200 group-hover:bg-blue-600 group-hover:text-white group-hover:ring-blue-500 transition">
-                    <span className="text-[10px] font-semibold uppercase">
-                      File
-                    </span>
-                  </div>
-                  <p className="truncate text-gray-900 group-hover:text-blue-800">
-                    {f.name}
-                  </p>
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <Info label="Unit / Rent">
+                    <div className="leading-6">
+                      <div className="font-medium">
+                        {lease.unitLabel ?? "—"}
+                      </div>
+                      <div className="text-gray-700">
+                        {asMoney(lease.rentCents)} / month
+                      </div>
+                    </div>
+                  </Info>
+
+                  <Info label="Term">
+                    {moveIn ? dateFmt.format(moveIn) : "—"}{" "}
+                    <span className="text-gray-400">→</span>{" "}
+                    {moveOut ? dateFmt.format(moveOut) : "open-ended"}
+                  </Info>
+
+					<Info label="Parties">
+					  <div className="space-y-3 text-sm text-slate-900">
+						{/* Tenant / household */}
+						<div>
+						  <div>Tenant, {lease.parties?.tenantName ?? "—"}</div>
+
+						  {tenantMembers.length > 0 && (
+							<div className="mt-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+							  <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+								{(lease.parties?.tenantName ?? "Household")} members
+							  </p>
+							  <ul className="mt-1 space-y-0.5 text-xs text-slate-600">
+								{tenantMembers.map((m, idx) => (
+								  <li
+									key={m.userId ?? m.email ?? idx}
+									className="flex items-center justify-between gap-2"
+								  >
+									<span className="truncate">
+									  {m.displayName ??
+										m.legalName ??
+										m.email ??
+										"Member"}
+									</span>
+									<span className="text-[10px] capitalize text-slate-500">
+									  {m.role ?? "member"}
+									</span>
+								  </li>
+								))}
+							  </ul>
+							</div>
+						  )}
+						</div>
+
+						{/* Landlord */}
+						<div>
+						  Landlord, {lease.parties?.landlordName ?? "—"}
+						</div>
+					  </div>
+					</Info>
+
+                  <Info label="Deposit">
+                    {lease.depositCents != null
+                      ? asMoney(lease.depositCents)
+                      : "—"}
+                  </Info>
+
+                  <Info className="sm:col-span-2" label="Address">
+                    {addressLines}
+                  </Info>
                 </div>
+              </Card>
 
-                <div className="ml-3 flex flex-none items-center gap-1 text-[11px] font-medium text-blue-700 group-hover:text-blue-800">
-                  <span>Open</span>
-                  <svg
-                    aria-hidden="true"
-                    viewBox="0 0 20 20"
-                    className="h-3.5 w-3.5"
-                  >
-                    <path
-                      d="M7.25 4.5h8.25m0 0v8.25m0-8.25L9 11.25"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.4"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                </div>
-              </a>
-            ))}
-          </div>
-        </section>
-      )}
-    </div>
-  )}
-</Card>
-      </section>
+              {/* Payments entry point */}
+              <Card
+                title="Payments"
+                subtitle="Manage up-front and monthly payments for this lease,"
+              >
+                <div className="flex flex-col gap-4">
+                  <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="space-y-1">
+                      <p className="text-sm text-gray-700">
+                        Review what you owe, see what you’ve already paid, and
+                        make secure payments for your move-in and ongoing rent.
+                      </p>
+                      <p className="flex items-center gap-1 text-[11px] text-slate-500">
+                        <svg
+                          aria-hidden="true"
+                          viewBox="0 0 20 20"
+                          className="h-3.5 w-3.5"
+                        >
+                          <path
+                            d="M4 8.5V7a6 6 0 1 1 12 0v1.5M5 9h10l-.7 7.02A1.5 1.5 0 0 1 12.8 17H7.2a1.5 1.5 0 0 1-1.49-1.35L5 9Z"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="1.3"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                        </svg>
+                        Payments are processed over encrypted connections,
+                      </p>
+                    </div>
 
-      {/* Checklist */}
-      <aside className="col-span-12 lg:col-span-5">
-        <Card title="Move-in checklist" subtitle="Mark completed items as you go">
-          {(lease.checklist ?? []).length ? (
-            <ul className="mt-1 divide-y divide-gray-100">
-              {(lease.checklist ?? []).map((it) => {
-                const done = !!it.completedAt;
-                const isInspection = it.key === "schedule_walkthrough";
-                const isPayUpfront = it.key === "pay_upfront";
-                const isPayDeposit = it.key === "pay_deposit";
-                const isPaymentTask = isPayUpfront || isPayDeposit;
-                const due = toDate(it.dueAt);
-                const doneAt = toDate(it.completedAt ?? undefined);
-
-                return (
-                  <li key={it.key} className="py-3 flex items-start gap-3">
-                    <label className="flex items-start gap-3 cursor-pointer select-none">
-                      <input
-                        aria-label={it.label}
-                        type="checkbox"
-                        className="mt-1 h-5 w-5 rounded border-gray-300"
-                        checked={done}
-                        onChange={(e) =>
-                          toggleChecklist(it.key, e.currentTarget.checked)
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={openDisclosure}
+                        disabled={!canQueryDisclosure}
+                        className={clsx(
+                          "inline-flex items-center justify-center rounded-lg px-3 py-2 text-xs font-semibold shadow-sm",
+                          canQueryDisclosure
+                            ? "bg-emerald-600 text-white hover:bg-emerald-700"
+                            : "bg-gray-200 text-gray-500 cursor-not-allowed",
+                        )}
+                        title={
+                          canQueryDisclosure
+                            ? "View Security Deposit Disclosure"
+                            : "Disclosure available after app & firm are resolved"
                         }
-                      />
-                      <div className="flex-1">
-                        <div
+                      >
+                        Deposit disclosure
+                      </button>
+
+                      <PaymentsLink
+                        appId={resolvedAppId}
+                        firmId={resolvedFirmId}
+                        className="inline-flex items-center justify-center rounded-lg bg-blue-600 px-3.5 py-2 text-xs font-semibold text-white shadow-sm hover:bg-blue-700"
+                        data-testid="open-payments-main"
+                      >
+                        Open payments
+                      </PaymentsLink>
+                    </div>
+                  </div>
+
+                  {/* Premium payment calendar */}
+                  {paymentCalendar.length > 0 && (
+                    <div className="mt-2 rounded-xl border border-slate-200 bg-slate-50/80 px-3 py-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowCalendar((v) => !v)}
+                        className="flex w-full items-center justify-between text-left text-xs font-medium text-slate-700"
+                      >
+                        <span className="flex items-center gap-2">
+                          <svg
+                            aria-hidden="true"
+                            viewBox="0 0 20 20"
+                            className="h-4 w-4 text-slate-500"
+                          >
+                            <path
+                              d="M6 3.5V5m8-1.5V5M4.5 8.5h11M5 5h10a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 15 16H5a1.5 1.5 0 0 1-1.5-1.5v-8A1.5 1.5 0 0 1 5 5Z"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="1.3"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            />
+                          </svg>
+                          Payment schedule
+                          <span className="text-[11px] font-normal text-slate-500">
+                            ({paymentCalendar.filter((r) => r.kind === "rent")
+                              .length ?? 0}{" "}
+                            rent payments)
+                          </span>
+                        </span>
+                        <span
                           className={clsx(
-                            "font-medium",
-                            done && "line-through text-gray-500"
+                            "inline-flex h-4 w-4 items-center justify-center rounded-full text-[10px] text-slate-500 transition-transform",
+                            showCalendar ? "rotate-90" : "",
                           )}
                         >
-                          {it.label}
-                        </div>
-                        <div className="text-xs text-gray-500">
-                          {due ? `Due ${dateFmt.format(due)}` : ""}
-                          {due && doneAt ? " · " : ""}
-                          {doneAt ? `Completed ${dateFmt.format(doneAt)}` : ""}
-                        </div>
+                          ▶
+                        </span>
+                      </button>
 
-                        {/* Inspection link (existing behavior) */}
-                        {isInspection && (
-                          <div className="mt-2">
-                            <a
-                              href="/tenant/inspection"
-                              className="inline-flex items-center rounded-md border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-900 hover:bg-gray-50"
-                            >
-                              Open Pre-Move Inspection
-                            </a>
+                      {showCalendar && (
+                        <div className="mt-2 rounded-lg bg-white/90 ring-1 ring-slate-100">
+                          <ul className="divide-y divide-slate-100 text-xs">
+                            {paymentCalendar.map((row, idx) => (
+                              <li
+                                key={`${row.label}-${idx}`}
+                                className="flex items-center justify-between px-3 py-2"
+                              >
+                                <div>
+                                  <div className="font-medium text-slate-800">
+                                    {row.label}
+                                  </div>
+                                  <div className="text-[11px] text-slate-500">
+                                    {row.due
+                                      ? `Due ${dateFmt.format(row.due)}`
+                                      : "Due before move-in"}
+                                  </div>
+                                </div>
+                                <div className="text-right">
+                                  <div className="text-sm font-semibold text-slate-900">
+                                    {asMoney(row.amountCents)}
+                                  </div>
+                                  <div className="text-[11px] uppercase tracking-wide text-slate-400">
+                                    {row.kind === "deposit"
+                                      ? "Deposit"
+                                      : "Rent"}
+                                  </div>
+                                </div>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </Card>
+
+              {/* Files / Documents */}
+              <Card
+                title="Lease documents"
+                subtitle="View your lease, disclosures, and other files shared with you,"
+              >
+                {landlordDocs.length === 0 && paymentFiles.length === 0 ? (
+                  <Empty hint="No documents shared yet," />
+                ) : (
+                  <div className="space-y-6">
+                    {landlordDocs.length > 0 && (
+                      <section>
+                        <div className="mb-2 flex items-center justify-between">
+                          <div>
+                            <p className="text-[11px] font-medium uppercase tracking-wide text-gray-500">
+                              Shared by your landlord
+                            </p>
+                            <p className="text-xs text-gray-500">
+                              Lease documents and required disclosures
+                            </p>
                           </div>
-                        )}
+                        </div>
 
-                        {/* Payment task links (deep-link to specific payment type) */}
-                        {isPaymentTask && (
-                          <div className="mt-2 flex flex-wrap items-center gap-2">
-                            <PaymentsLink
-                              appId={resolvedAppId}
-                              firmId={resolvedFirmId}
-                              type={isPayUpfront ? "upfront" : "deposit"}
-                              className="inline-flex items-center rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700"
-                              data-testid={`open-payments-${
-                                isPayUpfront ? "upfront" : "deposit"
-                              }`}
-                            >
-                              Open Payments
-                            </PaymentsLink>
+                        <div className="space-y-2">
+                          {landlordDocs.map((doc) => {
+                            const href = leaseId
+                              ? `/api/tenant/lease/document?leaseId=${encodeURIComponent(
+                                  leaseId,
+                                )}&docId=${encodeURIComponent(doc.id)}`
+                              : "#";
 
-                            {isPayDeposit && (
-                              <button
-                                type="button"
-                                onClick={openDisclosure}
-                                disabled={!canQueryDisclosure}
+                            const isDisabled = !leaseId;
+                            const Tag: any = isDisabled ? "div" : "a";
+
+                            return (
+                              <Tag
+                                key={doc.id}
+                                href={isDisabled ? undefined : href}
+                                target={isDisabled ? undefined : "_blank"}
+                                rel={isDisabled ? undefined : "noreferrer"}
+                                aria-disabled={isDisabled || undefined}
                                 className={clsx(
-                                  "inline-flex items-center rounded-md border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-900 hover:bg-gray-50",
-                                  !canQueryDisclosure &&
-                                    "opacity-70 cursor-not-allowed"
+                                  "group flex items-center justify-between rounded-xl border px-3.5 py-3 text-sm shadow-sm transition",
+                                  "bg-white/90 border-slate-200",
+                                  !isDisabled &&
+                                    "hover:border-blue-200 hover:bg-blue-50/80 hover:shadow-md",
+                                  isDisabled && "cursor-not-allowed opacity-60",
                                 )}
                               >
-                                View Deposit Disclosure
-                              </button>
-                            )}
+                                <div className="flex min-w-0 items-center gap-3">
+                                  <div className="flex h-9 w-9 flex-none items-center justify-center rounded-md bg-slate-900 text-slate-50 shadow-sm ring-1 ring-slate-900/10 group-hover:bg-blue-600 group-hover:ring-blue-500 transition">
+                                    <svg
+                                      aria-hidden="true"
+                                      viewBox="0 0 20 20"
+                                      className="h-4 w-4"
+                                    >
+                                      <path
+                                        d="M5 2.75A1.75 1.75 0 0 1 6.75 1h4.19c.46 0 .9.18 1.23.51l2.32 2.32c.33.33.51.77.51 1.23v11.19A1.75 1.75 0 0 1 13.25 18h-6.5A1.75 1.75 0 0 1 5 16.25v-13.5Z"
+                                        fill="currentColor"
+                                      />
+                                      <path
+                                        d="M11.5 1.5V4a1 1 0 0 0 1 1h2.5"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        strokeWidth="1.2"
+                                        strokeLinecap="round"
+                                      />
+                                    </svg>
+                                  </div>
 
-                            <span className="text-[11px] text-gray-600">
-                              {isPayUpfront
-                                ? "Up-front charges"
-                                : "Security deposit"}
-                            </span>
+                                  <div className="min-w-0">
+                                    <div className="flex items-center gap-2">
+                                      <p className="truncate font-medium text-slate-900 group-hover:text-blue-800">
+                                        {doc.title}
+                                      </p>
+                                      <span className="inline-flex items-center rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-blue-700">
+                                        PDF
+                                      </span>
+                                    </div>
+                                    {doc.externalDescription && (
+                                      <p className="mt-0.5 line-clamp-2 text-xs text-gray-500">
+                                        {doc.externalDescription}
+                                      </p>
+                                    )}
+                                  </div>
+                                </div>
+
+                                {!isDisabled && (
+                                  <div className="ml-3 flex flex-none items-center gap-1 text-[11px] font-medium text-blue-700 group-hover:text-blue-800">
+                                    <span>Open</span>
+                                    <svg
+                                      aria-hidden="true"
+                                      viewBox="0 0 20 20"
+                                      className="h-3.5 w-3.5"
+                                    >
+                                      <path
+                                        d="M7.25 4.5h8.25m0 0v8.25m0-8.25L9 11.25"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        strokeWidth="1.4"
+                                        strokeLinecap="round"
+                                        strokeLinejoin="round"
+                                      />
+                                    </svg>
+                                  </div>
+                                )}
+                              </Tag>
+                            );
+                          })}
+                        </div>
+                      </section>
+                    )}
+
+                    {paymentFiles.length > 0 && (
+                      <section>
+                        <div className="mb-2 flex items-center justify-between">
+                          <div>
+                            <p className="text-[11px] font-medium uppercase tracking-wide text-gray-500">
+                              Additional files
+                            </p>
+                            <p className="text-xs text-gray-500">
+                              Receipts, payment confirmations, and other uploads
+                            </p>
                           </div>
-                        )}
+                        </div>
 
-                        {it.notes ? (
-                          <div className="text-sm mt-1">{it.notes}</div>
-                        ) : null}
-                      </div>
-                    </label>
-                  </li>
-                );
-              })}
-            </ul>
-          ) : (
-            <Empty hint="No checklist items yet," />
+                        <div className="space-y-2">
+                          {paymentFiles.map((f) => (
+                            <a
+                              key={f.url}
+                              href={f.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="group flex items-center justify-between rounded-xl border border-gray-200 bg-white px-3.5 py-3 text-sm shadow-sm transition hover:border-blue-200 hover:bg-blue-50/70 hover:shadow-md"
+                            >
+                              <div className="flex min-w-0 items-center gap-3">
+                                <div className="flex h-8 w-8 flex-none items-center justify-center rounded-md bg-slate-50 text-slate-600 ring-1 ring-slate-200 group-hover:bg-blue-600 group-hover:text-white group-hover:ring-blue-500 transition">
+                                  <span className="text-[10px] font-semibold uppercase">
+                                    File
+                                  </span>
+                                </div>
+                                <p className="truncate text-slate-900 group-hover:text-blue-800">
+                                  {f.name}
+                                </p>
+                              </div>
+
+                              <div className="ml-3 flex flex-none items-center gap-1 text-[11px] font-medium text-blue-700 group-hover:text-blue-800">
+                                <span>Open</span>
+                                <svg
+                                  aria-hidden="true"
+                                  viewBox="0 0 20 20"
+                                  className="h-3.5 w-3.5"
+                                >
+                                  <path
+                                    d="M7.25 4.5h8.25m0 0v8.25m0-8.25L9 11.25"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="1.4"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                  />
+                                </svg>
+                              </div>
+                            </a>
+                          ))}
+                        </div>
+                      </section>
+                    )}
+                  </div>
+                )}
+              </Card>
+            </section>
+
+            {/* Checklist */}
+            <aside className="col-span-12 lg:col-span-5">
+              <Card
+                title="Move-in checklist"
+                subtitle="Mark completed items as you go,"
+              >
+                {(lease.checklist ?? []).length ? (
+                  <ul className="mt-1 divide-y divide-gray-100">
+                    {(lease.checklist ?? []).map((it) => {
+                      const done = !!it.completedAt;
+                      const isInspection = it.key === "schedule_walkthrough";
+                      const isPayUpfront = it.key === "pay_upfront";
+                      const isPayDeposit = it.key === "pay_deposit";
+                      const isPaymentTask = isPayUpfront || isPayDeposit;
+                      const due = toDate(it.dueAt);
+                      const doneAt = toDate(it.completedAt ?? undefined);
+
+                      return (
+                        <li key={it.key} className="py-3 flex items-start gap-3">
+                          <label className="flex items-start gap-3 cursor-pointer select-none">
+                            <input
+                              aria-label={it.label}
+                              type="checkbox"
+                              className="mt-1 h-5 w-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                              checked={done}
+                              onChange={(e) =>
+                                toggleChecklist(it.key, e.currentTarget.checked)
+                              }
+                            />
+                            <div className="flex-1">
+                              <div
+                                className={clsx(
+                                  "text-sm font-medium",
+                                  done && "line-through text-gray-500",
+                                )}
+                              >
+                                {it.label}
+                              </div>
+                              <div className="mt-0.5 text-xs text-gray-500">
+                                {due ? `Due ${dateFmt.format(due)}` : ""}
+                                {due && doneAt ? " · " : ""}
+                                {doneAt
+                                  ? `Completed ${dateFmt.format(doneAt)}`
+                                  : ""}
+                              </div>
+
+                              {/* Inspection link */}
+                              {isInspection && (
+                                <div className="mt-2">
+                                  <a
+                                    href="/tenant/inspection"
+                                    className="inline-flex items-center rounded-md border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-900 hover:bg-gray-50"
+                                  >
+                                    Open pre-move inspection
+                                  </a>
+                                </div>
+                              )}
+
+                              {/* Payment task links */}
+                              {isPaymentTask && (
+                                <div className="mt-2 flex flex-wrap items-center gap-2">
+                                  <PaymentsLink
+                                    appId={resolvedAppId}
+                                    firmId={resolvedFirmId}
+                                    type={isPayUpfront ? "upfront" : "deposit"}
+                                    className="inline-flex items-center rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700"
+                                    data-testid={`open-payments-${
+                                      isPayUpfront ? "upfront" : "deposit"
+                                    }`}
+                                  >
+                                    Open payments
+                                  </PaymentsLink>
+
+                                  {isPayDeposit && (
+                                    <button
+                                      type="button"
+                                      onClick={openDisclosure}
+                                      disabled={!canQueryDisclosure}
+                                      className={clsx(
+                                        "inline-flex items-center rounded-md border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-900 hover:bg-gray-50",
+                                        !canQueryDisclosure &&
+                                          "opacity-70 cursor-not-allowed",
+                                      )}
+                                    >
+                                      View deposit disclosure
+                                    </button>
+                                  )}
+
+                                  <span className="text-[11px] text-gray-600">
+                                    {isPayUpfront
+                                      ? "Up-front charges"
+                                      : "Security deposit"}
+                                  </span>
+                                </div>
+                              )}
+
+                              {it.notes ? (
+                                <div className="mt-1 text-xs text-gray-700">
+                                  {it.notes}
+                                </div>
+                              ) : null}
+                            </div>
+                          </label>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                ) : (
+                  <Empty hint="No checklist items yet," />
+                )}
+              </Card>
+            </aside>
+          </div>
+
+          {toast && <Toast text={toast} onClose={() => setToast(null)} />}
+
+          {/* Modal mount */}
+          {discOpen && (
+            <SecurityDepositDisclosureModal
+              open={discOpen}
+              onClose={() => setDiscOpen(false)}
+              receiptPath={disc?.receiptPath ?? null}
+              disclosureReady={!!disc?.disclosureReady}
+              bankReceiptDueISO={disc?.bankReceiptDueISO ?? null}
+            />
           )}
-        </Card>
-      </aside>
-
-      {toast && <Toast text={toast} onClose={() => setToast(null)} />}
-
-      {/* Modal mount */}
-      {discOpen && (
-        <SecurityDepositDisclosureModal
-          open={discOpen}
-          onClose={() => setDiscOpen(false)}
-          receiptPath={disc?.receiptPath ?? null}
-          disclosureReady={!!disc?.disclosureReady}
-          bankReceiptDueISO={disc?.bankReceiptDueISO ?? null}
-        />
-      )}
-    </div>
+        </div>
+      </div>
+    </main>
   );
 }
 
@@ -672,12 +975,12 @@ function Card({
   children: React.ReactNode;
 }) {
   return (
-    <div className="rounded-xl border border-gray-200 bg-white">
-      <div className="flex items-start justify-between gap-3 border-b border-gray-100 px-5 py-3">
+    <div className="rounded-2xl border border-slate-200 bg-white/95 shadow-sm">
+      <div className="flex items-start justify-between gap-3 border-b border-slate-100 px-5 py-3.5">
         <div>
-          <h2 className="text-sm font-semibold text-gray-900">{title}</h2>
+          <h2 className="text-sm font-semibold text-slate-900">{title}</h2>
           {subtitle && (
-            <p className="mt-0.5 text-xs text-gray-600">{subtitle}</p>
+            <p className="mt-0.5 text-xs text-slate-600">{subtitle}</p>
           )}
         </div>
         {right}
@@ -699,20 +1002,27 @@ function Info({
   return (
     <div
       className={clsx(
-        "rounded-lg border border-gray-200 bg-white p-3",
-        className
+        "rounded-xl border border-slate-200 bg-slate-50/80 p-3",
+        className,
       )}
     >
-      <div className="text-[11px] uppercase tracking-wide text-gray-500">
+      <div className="text-[11px] uppercase tracking-wide text-slate-500">
         {label}
       </div>
-      <div className="mt-1 text-sm text-gray-900">{children}</div>
+      <div className="mt-1 text-sm text-slate-900">{children}</div>
     </div>
   );
 }
 
 function Empty({ hint }: { hint: string }) {
-  return <div className="text-sm text-gray-600">{hint}</div>;
+  return (
+    <div className="text-sm text-gray-600">
+      {hint}{" "}
+      <span className="text-gray-400">
+        Your landlord may share documents here later,
+      </span>
+    </div>
+  );
 }
 
 function Toast({ text, onClose }: { text: string; onClose: () => void }) {

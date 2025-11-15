@@ -192,6 +192,21 @@ export default function LeaseHandoffDesktop({
       selected: false,
     });
     return [
+	  mk(
+		"schedule_walkthrough",
+		"Schedule pre-move walkthrough",
+		"Let the tenant pick a time for a condition walkthrough so they can document the unit before move-in."
+	  ),
+	  mk(
+		"pay_upfront",
+		"Complete up-front payments",
+		"Ask the tenant to pay any required up-front charges (first month, last month, key fees, etc.) before move-in."
+	  ),
+	  mk(
+		"pay_deposit",
+		"Pay security deposit",
+		"Prompt the tenant to pay the security deposit so you can provide a compliant deposit receipt and disclosure."
+	  ),
       mk(
         "renter_insurance",
         "Upload renter’s insurance policy",

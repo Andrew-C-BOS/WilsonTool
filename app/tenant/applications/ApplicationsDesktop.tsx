@@ -82,7 +82,7 @@ function Badge({ children, tone = "gray" }: { children: React.ReactNode; tone?: 
       className={clsx(
         "inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ring-1 ring-inset",
         "max-w-full truncate",
-        map[tone]
+        map[tone],
       )}
     >
       {children}
@@ -135,7 +135,7 @@ function Modal({
         aria-label={title}
         className={clsx(
           "fixed inset-x-0 bottom-0 top-auto w-full rounded-t-2xl bg-white shadow-xl ring-1 ring-gray-200",
-          "sm:left-1/2 sm:top-16 sm:bottom-auto sm:w-[92%] sm:max-w-md sm:-translate-x-1/2 sm:rounded-xl"
+          "sm:left-1/2 sm:top-16 sm:bottom-auto sm:w-[92%] sm:max-w-md sm:-translate-x-1/2 sm:rounded-xl",
         )}
         style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
       >
@@ -170,6 +170,18 @@ const showPaymentsButton = (s: AppStatus) => s === "min_due";
 const showSignButton = (_s: AppStatus) => false;
 const isLeaseActive = (s: AppStatus) => s === "countersigned" || s === "occupied";
 
+// Applications that the tenant is allowed to withdraw
+const WITHDRAWABLE: AppStatus[] = [
+  "draft",
+  "submitted",
+  "admin_screened",
+  "approved_high",
+  "terms_set",
+  "min_due",
+];
+
+const canWithdraw = (s: AppStatus) => WITHDRAWABLE.includes(s);
+
 export default function ApplicationsClient() {
   const [apps, setApps] = useState<TenantApp[]>(DEMO_APPS);
   const [toast, setToast] = useState<string | null>(null);
@@ -180,6 +192,7 @@ export default function ApplicationsClient() {
   const [chatBusyId, setChatBusyId] = useState<string | null>(null);
   const [payBusyId, setPayBusyId] = useState<string | null>(null);
   const [openBusyId, setOpenBusyId] = useState<string | null>(null);
+  const [withdrawBusyId, setWithdrawBusyId] = useState<string | null>(null);
 
   const [tab, setTab] = useState<Tab>("all");
   const [q, setQ] = useState("");
@@ -204,11 +217,16 @@ export default function ApplicationsClient() {
             setApps(compact);
           }
         }
-      } catch {}
+      } catch {
+        // ignore for now
+      }
     })();
   }, []);
 
-  const activeLease = useMemo(() => apps.find((a) => isLeaseActive(a.status)) || null, [apps]);
+  const activeLease = useMemo(
+    () => apps.find((a) => isLeaseActive(a.status)) || null,
+    [apps],
+  );
 
   const filtered = useMemo(() => {
     let arr = [...apps];
@@ -221,7 +239,7 @@ export default function ApplicationsClient() {
     if (q.trim()) {
       const t = q.toLowerCase();
       arr = arr.filter((a) =>
-        [a.formName, a.property, a.unit, STATUS_LABEL[a.status]].join(" ").toLowerCase().includes(t)
+        [a.formName, a.property, a.unit, STATUS_LABEL[a.status]].join(" ").toLowerCase().includes(t),
       );
     }
     return arr.sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
@@ -229,22 +247,21 @@ export default function ApplicationsClient() {
 
   /* ───────────────────────────────────────────────────────────
      Core: open/resolve an application for a form
-     - Validates the form exists
-     - Finds or creates the household's one-and-only app
-     - Navigates to /tenant/apply?form=...&app=...
   ─────────────────────────────────────────────────────────── */
   async function goToApply(formId: string, appId?: string) {
-    // If the row already has an app id, navigate directly (still works),
-    // but prefer hitting resolve to be robust if you want. We’ll keep it simple:
+    // If the row already has an app id, navigate directly
     if (appId) {
       window.location.href = `/tenant/apply?form=${encodeURIComponent(formId)}&app=${encodeURIComponent(appId)}`;
       return;
     }
     try {
-      const res = await fetch(`/api/tenant/applications/resolve?form=${encodeURIComponent(formId)}&create=1`, {
-        method: "GET",
-        cache: "no-store",
-      });
+      const res = await fetch(
+        `/api/tenant/applications/resolve?form=${encodeURIComponent(formId)}&create=1`,
+        {
+          method: "GET",
+          cache: "no-store",
+        },
+      );
       const j = await res.json().catch(() => null);
       if (!res.ok || !j?.ok || !j?.form || !(j?.app && j?.app?.id)) {
         setToast(j?.error ? `Could not open application, ${j.error}` : "Could not open application,");
@@ -266,10 +283,13 @@ export default function ApplicationsClient() {
     (async () => {
       setJoinOpen(false);
       try {
-        const res = await fetch(`/api/tenant/applications/resolve?form=${encodeURIComponent(code)}&create=1`, {
-          method: "GET",
-          cache: "no-store",
-        });
+        const res = await fetch(
+          `/api/tenant/applications/resolve?form=${encodeURIComponent(code)}&create=1`,
+          {
+            method: "GET",
+            cache: "no-store",
+          },
+        );
         const j = await res.json().catch(() => null);
         if (!res.ok || !j?.ok) {
           setToast(j?.error === "form_not_found" ? "Form not found," : "Could not start application,");
@@ -300,6 +320,51 @@ export default function ApplicationsClient() {
     }
   }
 
+	async function onWithdraw(app: TenantApp) {
+	  if (withdrawBusyId) return;
+	  setWithdrawBusyId(app.id);
+
+	  try {
+		const res = await fetch("/api/tenant/applications/withdraw", {
+		  method: "POST",
+		  headers: { "Content-Type": "application/json" },
+		  body: JSON.stringify({ appId: app.id }),
+		});
+
+		const j = await res.json().catch(() => null);
+
+		if (!res.ok || !j?.ok) {
+		  setToast(
+			j?.error
+			  ? `Could not withdraw application, ${j.error}`
+			  : "Could not withdraw application,"
+		  );
+		  setWithdrawBusyId(null);
+		  return;
+		}
+
+		// (Optional) optimistic update — can keep it or delete it
+		const today = new Date().toISOString().slice(0, 10);
+		setApps((prev) =>
+		  prev.map((x) =>
+			x.id === app.id ? { ...x, status: "withdrawn", updatedAt: today } : x
+		  )
+		);
+
+		// Show toast before reload
+		setToast("Application withdrawn,");
+
+		// Allow the toast to appear for 150ms then refresh
+		setTimeout(() => {
+		  window.location.reload();
+		}, 150);
+	  } catch {
+		setToast("Network error, please try again,");
+	  } finally {
+		setWithdrawBusyId(null);
+	  }
+	}
+
   return (
     <>
       {/* Top actions */}
@@ -311,7 +376,7 @@ export default function ApplicationsClient() {
               <div>
                 <div className="text-sm font-semibold text-emerald-900">You have an active lease</div>
                 <p className="mt-0.5 text-xs text-emerald-800">
-                  Manage move-in tasks, payments, and messages in your lease hub.
+                  Manage move-in tasks, payments, and messages in your lease hub,
                 </p>
               </div>
               <Link
@@ -362,7 +427,7 @@ export default function ApplicationsClient() {
                   onClick={() => setTab(t.id)}
                   className={clsx(
                     "px-3 py-2 text-sm rounded-md",
-                    tab === t.id ? "bg-gray-900 text-white" : "text-gray-700 hover:bg-gray-50 active:opacity-90"
+                    tab === t.id ? "bg-gray-900 text-white" : "text-gray-700 hover:bg-gray-50 active:opacity-90",
                   )}
                 >
                   {t.label}
@@ -372,7 +437,9 @@ export default function ApplicationsClient() {
           </div>
 
           <div className="relative w-full sm:w-auto">
-            <label htmlFor="app-search" className="sr-only">Search applications</label>
+            <label htmlFor="app-search" className="sr-only">
+              Search applications
+            </label>
             <input
               id="app-search"
               value={q}
@@ -382,7 +449,12 @@ export default function ApplicationsClient() {
             />
             <span className="pointer-events-none absolute right-2 top-2.5 text-gray-400">
               <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M21 21l-4.3-4.3M10 18a8 8 0 110-16 8 8 0 010 16z" stroke="currentColor" strokeWidth="2" fill="none" />
+                <path
+                  d="M21 21l-4.3-4.3M10 18a8 8 0 110-16 8 8 0 010 16z"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  fill="none"
+                />
               </svg>
             </span>
           </div>
@@ -399,7 +471,8 @@ export default function ApplicationsClient() {
           <div className="space-y-3">
             {filtered.map((a) => {
               const isBusy = openBusyId === a.id;
-              const openLabel = a.status === "submitted" || a.status === "admin_screened" ? "Review" : "Open";
+              const openLabel =
+                a.status === "submitted" || a.status === "admin_screened" ? "Review" : "Open";
 
               return (
                 <div key={a.id} className="rounded-xl border border-gray-200 bg-white p-4">
@@ -409,7 +482,9 @@ export default function ApplicationsClient() {
                         {a.formName}
                       </div>
                       <div className="text-xs text-gray-600 mt-0.5 truncate">
-                        {a.property ? `${a.property}${a.unit ? ` · Unit ${a.unit}` : ""}` : "Portfolio"}
+                        {a.property
+                          ? `${a.property}${a.unit ? ` · Unit ${a.unit}` : ""}`
+                          : "Portfolio"}
                       </div>
                       <div className="mt-1 flex flex-wrap items-center gap-2">
                         <StatusChip status={a.status} />
@@ -442,15 +517,23 @@ export default function ApplicationsClient() {
                                   body: JSON.stringify({ appId: a.id }),
                                 });
                                 const j = await res.json();
-                                if (!res.ok || !j?.ok) { setChatBusyId(null); return; }
+                                if (!res.ok || !j?.ok) {
+                                  setChatBusyId(null);
+                                  return;
+                                }
                                 const threadId = j.threadId ? String(j.threadId) : "";
                                 const url =
-                                  (j.redirect && typeof j.redirect === "string" && j.redirect.includes("/tenant/chat/"))
+                                  j.redirect &&
+                                  typeof j.redirect === "string" &&
+                                  j.redirect.includes("/tenant/chat/")
                                     ? j.redirect
                                     : threadId
                                     ? `/tenant/chat/${encodeURIComponent(threadId)}`
                                     : null;
-                                if (!url) { setChatBusyId(null); return; }
+                                if (!url) {
+                                  setChatBusyId(null);
+                                  return;
+                                }
                                 window.location.href = url;
                               } catch {
                                 setChatBusyId(null);
@@ -458,11 +541,26 @@ export default function ApplicationsClient() {
                             }}
                             className={clsx(
                               "inline-flex justify-center rounded-md border border-gray-300 bg-white text-sm font-medium px-3 py-2 text-gray-900 hover:bg-gray-50 active:opacity-90",
-                              chatBusyId === a.id && "opacity-60 cursor-not-allowed"
+                              chatBusyId === a.id && "opacity-60 cursor-not-allowed",
                             )}
                           >
                             {chatBusyId === a.id ? "Opening…" : "Chat"}
                           </button>
+
+                          {/* Withdraw */}
+                          {canWithdraw(a.status) && (
+                            <button
+                              disabled={withdrawBusyId === a.id}
+                              onClick={() => onWithdraw(a)}
+                              className={clsx(
+                                "inline-flex justify-center rounded-md border border-rose-300 bg-white text-sm font-medium px-3 py-2 text-rose-700 hover:bg-rose-50 active:opacity-90",
+                                withdrawBusyId === a.id && "opacity-60 cursor-not-allowed",
+                              )}
+                              title="Withdraw this application"
+                            >
+                              {withdrawBusyId === a.id ? "Withdrawing…" : "Withdraw"}
+                            </button>
+                          )}
 
                           {/* Open/Review application via resolve */}
                           <button
@@ -478,7 +576,7 @@ export default function ApplicationsClient() {
                             }}
                             className={clsx(
                               "inline-flex justify-center rounded-md bg-gray-900 text-white text-sm font-medium px-3 py-2 hover:bg-black active:opacity-90",
-                              isBusy && "opacity-60 cursor-not-allowed"
+                              isBusy && "opacity-60 cursor-not-allowed",
                             )}
                             title="Open application"
                           >
@@ -492,7 +590,7 @@ export default function ApplicationsClient() {
                               onClick={() => onPayHold(a.id)}
                               className={clsx(
                                 "inline-flex justify-center rounded-md border border-blue-300 bg-blue-50 text-blue-800 text-sm font-medium px-3 py-2 hover:bg-blue-100 active:opacity-90",
-                                payBusyId === a.id && "opacity-60 cursor-not-allowed"
+                                payBusyId === a.id && "opacity-60 cursor-not-allowed",
                               )}
                               title="Go to payments"
                             >
@@ -527,7 +625,9 @@ export default function ApplicationsClient() {
           <p className="text-sm text-gray-700">
             Enter the application code, we’ll attach the application to your household,
           </p>
-          <label htmlFor="invite-code" className="sr-only">Invite code</label>
+          <label htmlFor="invite-code" className="sr-only">
+            Invite code
+          </label>
           <input
             id="invite-code"
             value={joinCode}
@@ -538,14 +638,22 @@ export default function ApplicationsClient() {
             autoCapitalize="characters"
           />
           <div className="flex items-center justify-end gap-2">
-            <button onClick={() => setJoinOpen(false)} className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm active:opacity-90">
+            <button
+              onClick={() => setJoinOpen(false)}
+              className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm active:opacity-90"
+            >
               Cancel
             </button>
-            <button onClick={onJoin} className="rounded-md bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700 active:opacity-90">
+            <button
+              onClick={onJoin}
+              className="rounded-md bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700 active:opacity-90"
+            >
               Continue
             </button>
           </div>
-          <p className="text-xs text-gray-500">If you have a link, open it directly, we’ll handle the rest,</p>
+          <p className="text-xs text-gray-500">
+            If you have a link, open it directly, we’ll handle the rest,
+          </p>
         </div>
       </Modal>
 

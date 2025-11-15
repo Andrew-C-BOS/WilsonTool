@@ -13,7 +13,7 @@ const ORDER = [
   "complete_movein_checklist",
   "done",
 ] as const;
-type Step = typeof ORDER[number];
+type Step = (typeof ORDER)[number];
 
 type Next = {
   kind: Step;
@@ -89,7 +89,8 @@ function toAction(kind: Step, ctx: Record<string, string> = {}): Next {
         kind,
         href: `/tenant/movein/checklist?leaseId=${ctx.leaseId ?? ""}`,
         label: "Complete pre-move-in checklist",
-        sublabel: "Upload renters insurance, schedule key pickup, confirm utilities.",
+        sublabel:
+          "Upload renters insurance, schedule key pickup, confirm utilities.",
         progress: 6,
         context: ctx,
       };
@@ -99,7 +100,8 @@ function toAction(kind: Step, ctx: Record<string, string> = {}): Next {
         kind: "done",
         href: "/tenant/applications",
         label: "You’re all set",
-        sublabel: "Nothing urgent right now. Explore applications, payments, documents.",
+        sublabel:
+          "Nothing urgent right now. Explore applications, payments, documents.",
         progress: 6,
       };
   }
@@ -108,47 +110,86 @@ function toAction(kind: Step, ctx: Record<string, string> = {}): Next {
 /** Core decision logic */
 export async function getTenantHomeState(userId: string): Promise<HomeState> {
   // Collections you already have
-  const memberships = await col("household_memberhsips" as any).catch(() => null);
+  const memberships = await col("household_memberships" as any).catch(
+    () => null,
+  );
   const households = await col("households" as any).catch(() => null);
   const apps = await col("applications" as any).catch(() => null);
   const payments = await col("payments" as any).catch(() => null);
   const leases = await col("leases" as any).catch(() => null);
 
   // 1) Household presence + completeness
-  const membership: WithId<any> | null =
-    memberships ? await memberships.findOne({ userId, active: true }) : null;
+  const membership: WithId<any> | null = memberships
+    ? await memberships.findOne({ userId, active: true })
+    : null;
+
   const householdId = membership?.householdId ?? null;
   const household: WithId<any> | null =
-    householdId && households ? await households.findOne({ _id: householdId }) : null;
+    householdId && households
+      ? await households.findOne({ _id: householdId })
+      : null;
 
-  const householdComplete =
+  // Name: prefer displayName, fall back to name if present
+  const displayName = (household?.displayName ??
+    (household as any)?.name ??
+    "") as string;
+
+  const hasHouseholdName =
     !!household &&
-    Array.isArray(household.members) &&
-    household.members.length > 0 &&
-    !!household.address; // adjust to your schema
+    typeof displayName === "string" &&
+    displayName.trim().length > 0;
+
+  // Invites: treat any invite on this household (any state) as "invited someone"
+  const invites = await col("household_invites" as any).catch(() => null);
+  const inviteCount =
+    householdId && invites
+      ? await invites.countDocuments({ householdId })
+      : 0;
+  const hasHouseholdInvites = inviteCount > 0;
+
+  // Household is considered "complete" once either name or invites exist
+  const householdComplete =
+    !!household && (hasHouseholdName || hasHouseholdInvites);
 
   if (!household || !householdComplete) {
-    return finalize("configure_household", { householdId: householdId ?? "" });
+    return finalize("configure_household", {
+      householdId: householdId ? String(householdId) : "",
+    });
   }
 
   // 2) Application presence + state
-  const userApps: WithId<any>[] = apps
+  const allApps: WithId<any>[] = apps
     ? await apps
         .find({ householdId, archived: { $ne: true } })
         .sort({ updatedAt: -1 })
-        .limit(5)
         .toArray()
     : [];
 
-  const draft = userApps.find((a) => a.state === "draft");
-  if (!userApps.length) {
+  // Qualifying application: state is NOT rejected or withdrawn
+  const qualifying = allApps.filter(
+    (a) => a.state !== "rejected" && a.state !== "withdrawn",
+  );
+
+  // If no qualifying applications → "start_application"
+  if (!qualifying.length) {
     return finalize("start_application", {});
   }
-  if (draft) {
-    return finalize("continue_application", { appId: String(draft._id) });
+
+  // If there are qualifying apps and ALL of them are draft → "continue_application"
+  const drafts = qualifying.filter((a) => a.state === "draft");
+  const allQualifyingDrafts =
+    drafts.length > 0 && drafts.length === qualifying.length;
+
+  if (allQualifyingDrafts) {
+    // qualifying is sorted by updatedAt desc, so drafts[0] is the most recent draft
+    const mostRecentDraft = drafts[0];
+    return finalize("continue_application", {
+      appId: String(mostRecentDraft._id),
+    });
   }
 
-  const submitted = userApps.find((a) => a.state === "submitted");
+  // 2b) Some qualifying apps are beyond draft – check for submitted
+  const submitted = qualifying.find((a) => a.state === "submitted");
   if (submitted) {
     // 3) Holding fee requirement
     const holdingRequired = !!submitted.holdingFeeRequired;
@@ -167,7 +208,10 @@ export async function getTenantHomeState(userId: string): Promise<HomeState> {
 
   // 4) Lease stage
   const lease: WithId<any> | null = leases
-    ? await leases.findOne({ householdId, status: { $in: ["pending_signature", "signed"] } })
+    ? await leases.findOne({
+        householdId,
+        status: { $in: ["pending_signature", "signed"] },
+      })
     : null;
 
   if (lease?.status === "pending_signature") {
@@ -177,7 +221,9 @@ export async function getTenantHomeState(userId: string): Promise<HomeState> {
   // 5) Move-in checklist
   const checklistDone = !!lease?.moveIn?.checklistCompletedAt;
   if (lease?.status === "signed" && !checklistDone) {
-    return finalize("complete_movein_checklist", { leaseId: String(lease._id) });
+    return finalize("complete_movein_checklist", {
+      leaseId: String(lease._id),
+    });
   }
 
   // 6) Nothing urgent
@@ -209,7 +255,10 @@ function pickSecondary(kind: Step, ctx: Record<string, string>) {
       ];
     case "pay_holding_fee":
       return [
-        { href: `/tenant/applications/${ctx.appId ?? ""}`, label: "Review application" },
+        {
+          href: `/tenant/applications/${ctx.appId ?? ""}`,
+          label: "Review application",
+        },
         { href: "/tenant/payments", label: "Payment history" },
         { href: "/tenant/documents", label: "Documents" },
       ];

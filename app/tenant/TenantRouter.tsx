@@ -1,36 +1,19 @@
+// app/tenant/TenantRouter.tsx
 "use client";
 
 import { useEffect, useState } from "react";
 import TenantDesktop from "./TenantDesktop";
 import TenantMobile from "./TenantMobile";
+import type { TenantHomeState } from "@/lib/tenant/homeViewState";
 
 type SessionUser = { email: string | null };
-type HomeState = {
-  nextAction: {
-    kind:
-      | "configure_household"
-      | "start_application"
-      | "continue_application"
-      | "submit_application"
-      | "pay_holding_fee"
-      | "sign_lease"
-      | "complete_movein_checklist"
-      | "done";
-    href: string;
-    label: string;
-    sublabel?: string;
-    progress: number; // 0..6
-    context?: Record<string, string>;
-  };
-  secondary: { href: string; label: string }[];
-};
 
 export default function TenantRouter({
   user,
   state,
 }: {
   user: SessionUser;
-  state: HomeState | null;
+  state: TenantHomeState | null;
 }) {
   const [isMobile, setIsMobile] = useState<boolean | null>(null);
 
@@ -46,7 +29,17 @@ export default function TenantRouter({
     };
   }, []);
 
-  if (isMobile === null) return <div className="text-gray-600 text-sm px-4 py-3">Loading…</div>;
+  if (isMobile === null) {
+    return (
+      <div className="px-4 py-3 text-sm text-gray-600">
+        Loading…
+      </div>
+    );
+  }
 
-  return isMobile ? <TenantMobile user={user} /> : <TenantDesktop user={user} state={state} />;
+  return isMobile ? (
+    <TenantMobile user={user} state={state} />
+  ) : (
+    <TenantDesktop user={user} state={state} />
+  );
 }

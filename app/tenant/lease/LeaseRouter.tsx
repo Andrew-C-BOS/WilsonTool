@@ -3,7 +3,7 @@
 import dynamic from "next/dynamic";
 import { useEffect, useState } from "react";
 
-/* ---------- UI Types (unchanged) ---------- */
+/* ---------- Shared types ---------- */
 export type ChecklistItem = {
   key: string;
   label: string;
@@ -12,6 +12,47 @@ export type ChecklistItem = {
   notes?: string | null;
 };
 
+export type LeasePartyInfo = {
+  tenantName?: string | null;
+  landlordName?: string | null;
+};
+
+export type TenantMember = {
+  userId?: string | null;
+  role?: string | null;
+  email?: string | null;
+  legalName?: string | null;
+  displayName?: string | null;
+};
+
+export type PaymentPlan = {
+  monthlyRentCents?: number;
+  termMonths?: number;
+  startDate?: string;
+  securityCents?: number;
+  keyFeeCents?: number;
+  requireFirstBeforeMoveIn?: boolean;
+  requireLastBeforeMoveIn?: boolean;
+  countersignUpfrontThresholdCents?: number;
+  countersignDepositThresholdCents?: number;
+  upfrontTotals?: {
+    firstCents?: number;
+    lastCents?: number;
+    keyCents?: number;
+    securityCents?: number;
+    otherUpfrontCents?: number;
+    totalUpfrontCents?: number;
+  };
+  priority?: string[];
+};
+
+export type CountersignInfo = {
+  allowed?: boolean;
+  upfrontMinCents?: number;
+  depositMinCents?: number;
+};
+
+/* ---------- UI LeaseDoc ---------- */
 export type LeaseDoc = {
   _id: string;
   householdId: string;
@@ -19,28 +60,46 @@ export type LeaseDoc = {
   unitLabel?: string | null;
   rentCents: number;
   depositCents?: number | null;
-  startDate: string;           // ISO
-  endDate?: string | null;     // ISO
+  // We’ll store date-only strings here (YYYY-MM-DD) from the API
+  startDate: string;
+  endDate?: string | null;
   status: "draft" | "active" | "terminated";
-  parties?: { tenantName?: string | null; landlordName?: string | null } | null;
-  address: { addressLine1: string; addressLine2?: string | null; city: string; state: string; postalCode: string };
+  parties?: LeasePartyInfo | null;
+  address: {
+    addressLine1: string;
+    addressLine2?: string | null;
+    city: string;
+    state: string;
+    postalCode: string;
+  };
   files?: { name: string; url: string }[];
   checklist?: ChecklistItem[];
+
+  // extra enriched fields we get from the API
+  tenantMembers?: TenantMember[];
+  paymentPlan?: PaymentPlan | null;
+  countersign?: CountersignInfo | null;
 };
 
-/* ---------- API Types (new) ---------- */
+/* ---------- API Types (what /api/tenant/lease returns) ---------- */
 type LeaseAPI = {
   _id: string;
   firmId?: string | null;
   appId?: string | null;
   householdId: string;
-  monthlyRent: number;          // cents
-  moveInDate: string;           // "YYYY-MM-DD"
-  moveOutDate?: string | null;  // "YYYY-MM-DD" | null
+  monthlyRent: number; // cents
+  moveInDate: string; // "YYYY-MM-DD"
+  moveOutDate?: string | null; // "YYYY-MM-DD" | null
   propertyId?: string | null;
   signed?: boolean;
   signedAt?: string | null;
-  status: "scheduled" | "active" | "draft" | "terminated" | "pending" | "signed";
+  status:
+    | "scheduled"
+    | "active"
+    | "draft"
+    | "terminated"
+    | "pending"
+    | "signed";
   unitId?: string | null;
   unitNumber?: string | null;
   building: {
@@ -55,10 +114,28 @@ type LeaseAPI = {
   files?: { name: string; url: string }[];
   createdAt?: string;
   updatedAt?: string;
+
+  // Enriched fields from the lease API
+  depositCents?: number | null;
+  parties?: LeasePartyInfo | null;
+  tenantMembers?: TenantMember[];
+  paymentPlan?: PaymentPlan | null;
+  countersign?: CountersignInfo | null;
+
+  // Plus documents, etc., which LeaseDesktop reads as `(lease as any).documents`
+  documents?: any[];
 };
 
 type LeaseEnvelope =
-  | { ok: true; leases: { current: LeaseAPI | null; upcoming: LeaseAPI[]; past: LeaseAPI[]; all: LeaseAPI[] } }
+  | {
+      ok: true;
+      leases: {
+        current: LeaseAPI | null;
+        upcoming: LeaseAPI[];
+        past: LeaseAPI[];
+        all: LeaseAPI[];
+      };
+    }
   | { ok: false; error: string };
 
 /* ---------- Dynamic views ---------- */
@@ -72,27 +149,50 @@ const LeaseMobile = dynamic(() => import("./LeaseMobile"), {
 });
 
 /* ---------- Helpers ---------- */
-const toISO = (ymd?: string | null) => (ymd ? new Date(ymd).toISOString() : null);
+// For YYYY-MM-DD strings, don't convert to full ISO timestamps – just pass through
+const toISO = (ymd?: string | null) => (ymd ? ymd : null);
+
+const formatYmd = (ymd: string) => {
+  const [y, m, d] = ymd.split("-").map(Number);
+  return new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  }).format(new Date(y, m - 1, d));
+};
 
 /** Map raw API lease → UI LeaseDoc shape your components expect. */
 function mapToUiLease(raw: LeaseAPI): LeaseDoc {
-  // Map API statuses to your UI’s union, conservatively
+  // Tenant-facing status: treat scheduled/signed as "active" for now
   let uiStatus: LeaseDoc["status"] = "draft";
-  if (raw.status === "active") uiStatus = "active";
-  else if (raw.status === "terminated") uiStatus = "terminated";
-  // "scheduled" reads fine as draft in the UI, until you add a Scheduled pill
+  if (
+    raw.status === "active" ||
+    raw.status === "scheduled" ||
+    raw.status === "signed"
+  ) {
+    uiStatus = "active";
+  } else if (raw.status === "terminated") {
+    uiStatus = "terminated";
+  }
 
-  return {
+  const startDate =
+    toISO(raw.moveInDate) ?? new Date().toISOString().slice(0, 10);
+
+  const leaseDoc: LeaseDoc = {
     _id: raw._id,
     householdId: raw.householdId,
     propertyId: raw.propertyId ?? "",
     unitLabel: raw.unitNumber ?? null,
     rentCents: raw.monthlyRent ?? 0,
-    depositCents: null,
-    startDate: toISO(raw.moveInDate) ?? new Date().toISOString(),
+    depositCents:
+      raw.depositCents != null ? raw.depositCents : null,
+
+    startDate,
     endDate: toISO(raw.moveOutDate),
     status: uiStatus,
-    parties: { tenantName: null, landlordName: null },
+
+    parties: raw.parties ?? null,
+
     address: {
       addressLine1: raw.building?.addressLine1,
       addressLine2: raw.building?.addressLine2 ?? null,
@@ -100,9 +200,19 @@ function mapToUiLease(raw: LeaseAPI): LeaseDoc {
       state: raw.building?.state,
       postalCode: raw.building?.postalCode,
     },
+
     files: raw.files ?? [],
     checklist: raw.checklist ?? [],
+
+    tenantMembers: raw.tenantMembers ?? [],
+    paymentPlan: raw.paymentPlan ?? null,
+    countersign: raw.countersign ?? null,
   };
+
+  // You can log here if you want to sanity-check the mapping:
+  // console.log("[LeaseRouter][mapToUiLease]", { raw, leaseDoc });
+
+  return leaseDoc;
 }
 
 export default function LeaseRouter() {
@@ -137,18 +247,32 @@ export default function LeaseRouter() {
         const res = await fetch("/api/tenant/lease", { cache: "no-store" });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data: LeaseEnvelope = await res.json();
-        if (!("ok" in data) || !data.ok) throw new Error((data as any)?.error || "load_failed");
+        if (!("ok" in data) || !data.ok) {
+          throw new Error((data as any)?.error || "load_failed");
+        }
+
+        console.log("[LeaseRouter][rawEnvelope]", data);
 
         const current = data.leases.current;
         const firstUpcoming = data.leases.upcoming?.[0] ?? null;
 
         if (current) {
-          setLease(mapToUiLease(current));
-          setBanner(null);
+          const uiLease = mapToUiLease(current);
+          console.log("[LeaseRouter][mappedCurrent]", uiLease);
+          setLease(uiLease);
+          setBanner(
+            current.moveInDate
+              ? `Lease starts ${formatYmd(current.moveInDate)},`
+              : null,
+          );
         } else if (firstUpcoming) {
-          setLease(mapToUiLease(firstUpcoming));
+          const uiLease = mapToUiLease(firstUpcoming);
+          console.log("[LeaseRouter][mappedUpcoming]", uiLease);
+          setLease(uiLease);
           const start = firstUpcoming.moveInDate;
-          setBanner(start ? `Lease starts ${new Date(start).toLocaleDateString()},` : "Upcoming lease,");
+          setBanner(
+            start ? `Lease starts ${formatYmd(start)},` : "Upcoming lease,",
+          );
         } else {
           setLease(null);
         }
@@ -162,17 +286,16 @@ export default function LeaseRouter() {
 
   if (!mounted) return null;
   if (err) return <div className="px-4 text-sm text-rose-700">{err}</div>;
-  if (!lease) return <div className="px-4 text-sm text-gray-600">No lease to show,</div>;
+  if (!lease)
+    return (
+      <div className="px-4 text-sm text-gray-600">No lease to show,</div>
+    );
 
   const View = isMobile ? LeaseMobile : LeaseDesktop;
 
   return (
     <>
-      {banner && (
-        <div className="mx-4 mb-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-          {banner}
-        </div>
-      )}
+      {/* If you want to surface the banner on the page, you can pass it as a prop later */}
       <View lease={lease} onLeaseUpdated={setLease} />
     </>
   );
