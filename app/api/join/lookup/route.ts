@@ -25,18 +25,49 @@ function toMaybeObjectId(v: any): ObjectId | null {
   }
 }
 
+type InviteStatus = "active" | "expired" | "redeemed";
+
+type InviteMatch =
+  | "anon"
+  | "already_member"
+  | "email_match"
+  | "email_mismatch";
+
+type InviteMeta = {
+  emailMasked: string;
+  emailRaw: string;
+  role: "primary" | "co_applicant" | "cosigner";
+  householdLine: string | null;
+  expiresAtISO: string | null;
+  status: InviteStatus;
+  isLoggedIn: boolean;
+  sessionEmail: string | null;
+  match: InviteMatch;
+};
+
 export async function GET(req: NextRequest) {
   try {
     const url = new URL(req.url);
     const code = url.searchParams.get("code") || "";
-    if (!code) return json({ ok: false, error: "missing_code" }, 400);
+
+    if (!code) {
+      return NextResponse.json(
+        { ok: false, error: "missing_code" },
+        { status: 400 },
+      );
+    }
 
     const db = await getDb();
     const invites = db.collection("household_invites");
     const codeHash = sha256(code);
 
     const inv = await invites.findOne({ codeHash });
-    if (!inv) return json({ ok: false, error: "invalid_or_used" }, 404);
+    if (!inv) {
+      return NextResponse.json(
+        { ok: false, error: "invalid_or_used" },
+        { status: 404 },
+      );
+    }
 
     const now = new Date();
     let status: "active" | "expired" | "redeemed" = "active";

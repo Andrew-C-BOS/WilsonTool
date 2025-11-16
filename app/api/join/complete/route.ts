@@ -160,14 +160,19 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Helper: mark invite redeemed with audit, leave `email` untouched
     async function markInviteRedeemed(
       redeemedByUserId: string,
       redeemedByEmail: string,
       extras?: Record<string, any>,
     ) {
+      if (!inv) {
+        // This should be impossible because we returned above if !inv,
+        // but this keeps TypeScript + runtime both happy.
+        throw new Error("Invite missing when trying to mark redeemed");
+      }
+
       await invites.updateOne(
-        { _id: inv._id },
+        { _id: inv._id }, // or inv!._id if you prefer the non-null assertion
         {
           $set: {
             state: "redeemed",
