@@ -15,6 +15,8 @@ import {
   X,
   UserCircle2,
   LogOut,
+  Info,
+  CheckCircle2,
 } from "lucide-react";
 
 /* ─────────────────────────────────────────────────────────────
@@ -54,6 +56,27 @@ function Badge({
   );
 }
 
+function Pill({ active, children }: { active?: boolean; children: React.ReactNode }) {
+  return (
+    <div
+      className={clsx(
+        "inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold",
+        active
+          ? "bg-indigo-600 text-white shadow-sm"
+          : "bg-indigo-50 text-indigo-700 border border-indigo-100"
+      )}
+    >
+      <span
+        className={clsx(
+          "inline-block h-1.5 w-1.5 rounded-full",
+          active ? "bg-white/80" : "bg-indigo-400"
+        )}
+      />
+      {children}
+    </div>
+  );
+}
+
 function Card({
   children,
   badgeText,
@@ -72,17 +95,23 @@ function Card({
   id?: string;
 }) {
   const border =
-    tone === "emphasis" ? "border-l-4 border-gray-800" : "border-l-4 border-gray-200";
+    tone === "emphasis" ? "border-l-4 border-rose-400" : "border-l-4 border-gray-200";
   return (
-    <div id={id} className={clsx("rounded-xl bg-white p-6 shadow", border)}>
+    <div
+      id={id}
+      className={clsx(
+        "rounded-2xl bg-white p-6 shadow-sm ring-1 ring-gray-100",
+        border
+      )}
+    >
       <div className="flex items-center justify-between gap-4">
-        <h2 className="flex items-center text-xl font-semibold text-gray-900">
+        <h2 className="flex items-center text-lg font-semibold text-gray-900">
           {titleIcon ? <span className="mr-3 h-6 w-6">{titleIcon}</span> : null}
           {title}
         </h2>
         <div className="flex items-center gap-3">
           {badgeText ? (
-            <span className="rounded-full bg-gray-100 px-3 py-1 text-sm font-medium text-gray-700">
+            <span className="rounded-full bg-gray-100 px-3 py-1 text-xs font-medium text-gray-700">
               {badgeText}
             </span>
           ) : null}
@@ -100,12 +129,14 @@ function PrimaryButton({
   onClick,
   disabled,
   tone = "gray",
+  className,
 }: {
   children: React.ReactNode;
   href?: string;
   onClick?: () => void;
   disabled?: boolean;
   tone?: "gray" | "indigo" | "rose";
+  className?: string;
 }) {
   const toneCls =
     tone === "indigo"
@@ -113,35 +144,54 @@ function PrimaryButton({
       : tone === "rose"
       ? "bg-rose-600 hover:bg-rose-700 text-white"
       : "bg-gray-900 hover:bg-black text-white";
-  const className = clsx(
-    "inline-flex items-center justify-center rounded-lg px-4 py-2 text-sm font-semibold",
-    disabled ? "bg-gray-300 text-gray-600 cursor-not-allowed" : toneCls
+
+  const finalClassName = clsx(
+    "inline-flex items-center justify-center rounded-lg px-4 py-2 text-sm font-semibold shadow-sm transition",
+    disabled ? "bg-gray-300 text-gray-600 cursor-not-allowed shadow-none" : toneCls,
+    className,
   );
-  if (href) return <Link href={href} className={className}>{children}</Link>;
+
+  if (href) {
+    return (
+      <Link href={href} className={finalClassName}>
+        {children}
+      </Link>
+    );
+  }
+
   return (
-    <button className={className} onClick={onClick} disabled={disabled}>
+    <button className={finalClassName} onClick={onClick} disabled={disabled}>
       {children}
     </button>
   );
 }
+
 
 function GhostButton({
   children,
   onClick,
   disabled,
   title,
+  className,
 }: {
   children: React.ReactNode;
   onClick?: () => void;
   disabled?: boolean;
   title?: string;
+  className?: string;
 }) {
+  const base =
+    "inline-flex items-center justify-center rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50 transition";
+
+  const finalClassName = clsx(
+    base,
+    disabled && "opacity-60 cursor-not-allowed",
+    className
+  );
+
   return (
     <button
-      className={clsx(
-        "inline-flex items-center justify-center rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50",
-        disabled && "opacity-60 cursor-not-allowed"
-      )}
+      className={finalClassName}
       onClick={onClick}
       disabled={disabled}
       title={title}
@@ -166,7 +216,7 @@ function Modal({
   return (
     <div className="fixed inset-0 z-50">
       <div className="absolute inset-0 bg-black/30" onClick={onClose} />
-      <div className="fixed left-1/2 top-16 w-[92%] max-w-lg -translate-x-1/2 rounded-xl bg-white shadow-xl ring-1 ring-gray-200">
+      <div className="fixed left-1/2 top-16 w-[92%] max-w-lg -translate-x-1/2 rounded-2xl bg-white shadow-2xl ring-1 ring-gray-200">
         <div className="flex items-center justify-between border-b border-gray-100 px-5 py-4">
           <h3 className="text-base font-semibold text-gray-900">{title}</h3>
           <button
@@ -217,8 +267,17 @@ type IncomingInvite = {
 /* ─────────────────────────────────────────────────────────────
    Component
 ───────────────────────────────────────────────────────────── */
-export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluster }) {
+export default function HouseholdDesktop({
+  cluster,
+  state,
+}: {
+  cluster: HouseholdCluster;
+  // state is an object that may have primaryKind, and it may be null/undefined
+  state?: { primaryKind?: string } | null;
+}) {
   const router = useRouter();
+
+  const isConfigure = state?.primaryKind === "configure_household";
 
   const [toast, setToast] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -258,6 +317,15 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
   const canLeave = memberCount > 1;
   const headerName = cluster.displayName ?? "Untitled household";
   const hasIncomingInvites = incomingInvites.length > 0;
+
+  // two simple tones based on primaryKind
+  const statusTone: "info" | "success" = isConfigure ? "info" : "success";
+  const statusTitle = isConfigure
+    ? "Set up your household before you apply,"
+    : "Your household is set up,";
+  const statusBody = isConfigure
+    ? "Decide who belongs in this household. Invite co-applicants or cosigners, or join a household someone has already created. Give your household a recognizable name so you and your property manager can recognize it quickly."
+    : "Everyone on this lease is linked through this household, you can still rename it or adjust members here, but most next steps live on your home and application pages,";
 
   function flash(msg: string) {
     setToast(msg);
@@ -340,33 +408,6 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
     } catch (e: any) {
       setInvites(prev);
       flash(`Revoke failed, ${e.message || "error"},`);
-    }
-  }
-
-  // Join by code (email link, "Join with a code")
-  async function redeemInvite(code: string) {
-    setBusy(true);
-    try {
-      const res = await fetch("/api/tenant/household/invites/redeem", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code }),
-      });
-      const json = await res.json();
-      if (!json?.ok) throw new Error(json?.error || "redeem_failed");
-      flash("Joined,");
-      router.refresh();
-    } catch (e: any) {
-      const msg = e?.message || "redeem_failed";
-      const reason =
-        msg === "wrong_email"
-          ? "wrong email for this code,"
-          : msg === "invalid_or_expired"
-          ? "invalid or expired code,"
-          : msg || "error,";
-      flash(`Couldn’t join, ${reason}`);
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -484,8 +525,6 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
   useEffect(() => {
     fetchInvites();
     fetchIncomingInvites();
-    // Optionally hydrate preferredName from cluster:
-    // setPreferredName(cluster.me?.preferredName ?? "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -493,66 +532,134 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
      Render
   ─────────────────────────────────────────────────────────── */
   return (
-    <main className="mx-auto max-w-6xl px-6 py-8">
-      {/* Header */}
-      <header className="mb-8 rounded-xl bg-white p-6 shadow">
-        <h1 className="text-2xl font-semibold text-gray-900">Configure your household</h1>
+    <main className="min-h-[calc(100vh-4rem)] bg-[#e6edf1]">
+      {/* Hero / header */}
+	  <div className="mx-auto max-w-6xl px-6 py-8">
+      <header className="mb-8 rounded-3xl bg-gradient-to-r from-indigo-50 via-sky-50 to-rose-50 p-6 shadow-sm ring-1 ring-indigo-100/60">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2 text-xs font-semibold text-indigo-700">
+              {isConfigure ? (
+                <>
+                  <Pill active>Step 1</Pill>
+                  <span className="hidden text-indigo-500 sm:inline">
+                    Before you Apply
+                  </span>
+                </>
+              ) : (
+                <span className="rounded-full bg-indigo-50 px-3 py-1 text-[11px] font-semibold text-indigo-700">
+                  Household overview
+                </span>
+              )}
+            </div>
+            <h1 className="mt-3 text-2xl font-semibold text-gray-900">
+              {isConfigure ? "Configure your household" : "Your household"}
+            </h1>
+            <p className="mt-2 max-w-2xl text-sm text-gray-600">
+              Your application is based on your household. Co-applicants and cosigners must be linked here 
+			  so property managers see one clear group instead of separate submissions.
+            </p>
+          </div>
 
-        {/* Household name badge */}
-        <div className="mt-2 flex flex-wrap items-center gap-2">
-          <span className="text-sm font-semibold text-gray-700">Household:</span>
-          <span className="rounded-full bg-gray-100 px-3 py-1 text-sm font-semibold text-gray-900">
-            {headerName}
-          </span>
+          <div className="flex flex-col items-end gap-2 text-right">
+            <span className="rounded-full bg-white/80 px-3 py-1 text-xs font-medium text-gray-700 shadow-sm">
+              Household name
+              <span className="mx-1 text-gray-400">·</span>
+              {headerName}
+            </span>
+            <span className="text-xs text-gray-500">
+              {memberCount} member{memberCount === 1 ? "" : "s"} linked through this household,
+            </span>
+          </div>
         </div>
 
-        <p className="mt-3 text-gray-600">
-          Invite members, join with a code, join from an invite, set your preferred name, rename the household, or, leave the household,
-        </p>
-
-        <div className="mt-4 flex flex-wrap gap-2">
-          <PrimaryButton
-            onClick={() => {
-              setInviteOpen(true);
-              fetchInvites();
-            }}
-            tone="gray"
-          >
-            <UserPlus className="mr-2 h-4 w-4" />
-            Share invite
-          </PrimaryButton>
-
-          <GhostButton
-            onClick={() => setJoinOpen(true)}
-            disabled={!canJoin}
-            title={
-              canJoin
-                ? "Join with a code,"
-                : "You can’t join another household with a code while yours has more than one member,"
-            }
-          >
-            <LinkIcon className="mr-2 h-4 w-4" />
-            Join with a code
-          </GhostButton>
-
-          <GhostButton
-            onClick={() => setJoinFromInviteOpen(true)}
-            disabled={!hasIncomingInvites}
-            title={
-              hasIncomingInvites
-                ? "Join a household you’ve been invited to,"
-                : incomingLoading
-                ? "Checking for invites…"
-                : "No active invites found for your email,"
-            }
-          >
-            <Users className="mr-2 h-4 w-4" />
-            Join from invite
-          </GhostButton>
+        {/* Status strip */}
+        <div
+          className={clsx(
+            "mt-4 flex items-start gap-3 rounded-2xl border px-4 py-3 text-sm shadow-sm backdrop-blur",
+            statusTone === "success" &&
+              "border-emerald-200 bg-emerald-50/70 text-emerald-900",
+            statusTone === "info" &&
+              "border-indigo-200 bg-white/70 text-indigo-900"
+          )}
+        >
+          <div className="mt-0.5">
+            {statusTone === "success" ? (
+              <CheckCircle2 className="h-5 w-5 text-emerald-500" />
+            ) : (
+              <Info className="h-5 w-5 text-indigo-500" />
+            )}
+          </div>
+          <div>
+            <div className="text-sm font-semibold">{statusTitle}</div>
+            <p className="mt-1 text-xs text-gray-700">{statusBody}</p>
+            {isConfigure ? (
+              <p className="mt-1 text-[11px] text-gray-500">
+                Your household will be complete once you set your household name (Rename Household Section).
+              </p>
+            ) : (
+              <p className="mt-1 text-[11px] text-gray-500">
+                For next steps, use your home page to move into applications, payments, and
+                documents, this page is here when you need to update the people linked to you,
+              </p>
+            )}
+          </div>
         </div>
+
+        {/* Primary actions row */}
+{isConfigure ? (
+		<div/>
+) : (
+          <div className="mt-5 flex flex-wrap items-center gap-2">
+            <PrimaryButton href="/tenant" tone="indigo">
+              Return to home
+            </PrimaryButton>
+            <GhostButton>
+              <Link href="/tenant/applications">Go to applications</Link>
+            </GhostButton>
+            <span className="text-[11px] text-gray-500">
+              You can still invite, join, or rename below if something changes,
+            </span>
+          </div>
+        )}
+
+        {/* Small “how this works” helper – only needed in configure mode */}
+        {isConfigure && (
+          <div className="mt-5 grid gap-3 text-xs text-gray-600 sm:grid-cols-3">
+            <div className="rounded-xl bg-white/70 px-3 py-3 shadow-sm">
+              <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">
+                1, Decide who’s in
+              </div>
+              <p className="mt-1">
+                Invite anyone who should sign the lease, co-applicants, cosigners, or roommates,
+                or join an existing household from an invite,
+              </p>
+            </div>
+            <div className="rounded-xl bg-white/70 px-3 py-3 shadow-sm">
+              <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">
+                2, Name the household
+              </div>
+              <p className="mt-1">
+                Give the household a short name you recognize quickly, we use this across your
+                application and lease,
+              </p>
+            </div>
+            <div className="rounded-xl bg-white/70 px-3 py-3 shadow-sm">
+              <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">
+                3, Set your preferred name
+              </div>
+              <p className="mt-1">
+                Set how your name appears to property managers, for example “Andrew C,” instead of a
+                long email address,
+              </p>
+            </div>
+          </div>
+        )}
       </header>
 
-      <section className="grid gap-6 sm:grid-cols-2">
+      {/* Main content grid */}
+      <section className="grid gap-6 lg:grid-cols-2">
+	  
         {/* Members */}
         <Card
           title="Members"
@@ -560,7 +667,7 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
           badgeText={`${memberCount} total`}
         >
           {/* Preferred name editor */}
-          <div className="mb-4 rounded-lg border border-gray-200 bg-white p-3">
+          <div className="mb-4 rounded-xl border border-gray-200 bg-gray-50 p-3">
             <div className="flex items-center gap-2">
               <UserCircle2 className="h-5 w-5 text-indigo-500" />
               <div className="text-sm font-medium text-gray-900">Preferred name</div>
@@ -590,7 +697,7 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
             {cluster.members.map((m) => (
               <div
                 key={m.id}
-                className="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-3 py-2"
+                className="flex items-center justify-between rounded-xl border border-gray-200 bg-white px-3 py-2"
               >
                 <div className="min-w-0">
                   <div className="truncate text-sm font-medium text-gray-900">
@@ -611,69 +718,141 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
           </div>
         </Card>
 
-        {/* Invites (outgoing) */}
-        <Card
-          title="Household invites"
-          titleIcon={<UserPlus className="text-indigo-500" />}
-          right={
-            <GhostButton
-              onClick={() => {
-                setInviteOpen(true);
-                fetchInvites();
-              }}
-            >
-              New invite
-            </GhostButton>
-          }
-        >
-          {invites.length === 0 ? (
-            <p className="text-sm text-gray-600">No active invites, create a new one to add members,</p>
-          ) : (
-            <div className="space-y-2">
-              {invites.map((inv) => (
-                <div
-                  key={inv.id}
-                  className="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-3 py-2"
-                >
-                  <div className="min-w-0">
-                    <div className="truncate text-sm font-medium text-gray-900">{inv.email}</div>
-                    <div className="text-xs text-gray-600">
-                      Role: {inv.role.replace("_", " ")},{" "}
-                      Expires: {new Date(inv.expiresAt).toLocaleString()}
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      className="inline-flex items-center rounded-md border border-gray-300 bg-white px-2 py-1 text-xs hover:bg-gray-100"
-                      onClick={() => copy(inv.inviteUrlTemplate ?? "")}
-                      title={
-                        inv.inviteUrlTemplate
-                          ? "Copies a link template, create a fresh invite for a full link,"
-                          : "Create a new invite to get a full link,"
-                      }
-                    >
-                      <CopyIcon className="mr-1 h-3.5 w-3.5" />
-                      Copy link
-                    </button>
-                    <button
-                      className="inline-flex items-center rounded-md border border-gray-300 bg-white px-2 py-1 text-xs hover:bg-gray-100"
-                      onClick={() => revokeInvite(inv.id)}
-                    >
-                      <Trash2 className="mr-1 h-3.5 w-3.5" />
-                      Revoke
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-          <p className="mt-3 text-xs text-gray-500">
-            New invites show the code instantly, active invites expire after 15 days,
-          </p>
-        </Card>
+		{/* Invites (outgoing) */}
+		<Card
+		  title="Household invites"
+		  titleIcon={<UserPlus className="text-indigo-500" />}
+		  tone={isConfigure ? "emphasis" : "neutral"}
+		  right={
+			isConfigure ? (
+			  <span className="text-[11px] font-semibold uppercase tracking-wide text-rose-500">
+				Start here
+			  </span>
+			) : null
+		  }
+		>
+		  {/* Primary actions for invites live here now */}
+<div className="mb-4 grid grid-cols-1 sm:grid-cols-2 gap-2">
+  {/* Share Invite */}
+  <PrimaryButton
+    onClick={() => {
+      setInviteOpen(true);
+      fetchInvites();
+    }}
+    tone="gray"
+    className="w-full justify-center"
+  >
+    <UserPlus className="mr-2 h-4 w-4" />
+    Share Invite
+  </PrimaryButton>
+
+  {/* Join from invite with tooltip */}
+  <span
+    className={clsx(
+      "relative group w-full",
+      !hasIncomingInvites && "cursor-not-allowed"
+    )}
+  >
+    <GhostButton
+      onClick={() => {
+        if (!hasIncomingInvites) return;
+        setJoinFromInviteOpen(true);
+      }}
+      disabled={!hasIncomingInvites}
+      className="w-full justify-center"
+    >
+      <Users className="mr-2 h-4 w-4" />
+      Join from invite
+    </GhostButton>
+
+    {/* Tooltip */}
+    {!hasIncomingInvites && (
+      <div
+        className={clsx(
+          "pointer-events-none absolute left-1/2 top-full z-20 mt-2 -translate-x-1/2",
+          "whitespace-nowrap rounded-md bg-gray-900 px-3 py-1 text-xs text-white shadow-lg",
+          "opacity-0 group-hover:opacity-100 transition-opacity"
+        )}
+      >
+        {incomingLoading
+          ? "Checking for invites tied to this email…"
+          : "No active invites found for this email,"}
+      </div>
+    )}
+  </span>
+  
+</div>
+<hr className="my-4 border-t border-gray-200" />
+		  {/* Existing invites list */}
+		  {invites.length === 0 ? (
+			<p className="text-sm text-gray-600">
+			  No active invites, create a new one to add members,
+			</p>
+		  ) : (
+			<div className="space-y-2">
+			  {invites.map((inv) => (
+				<div
+				  key={inv.id}
+				  className="flex items-center justify-between rounded-xl border border-gray-200 bg-gray-50 px-3 py-2"
+				>
+				  <div className="min-w-0">
+					<div className="truncate text-sm font-medium text-gray-900">
+					  {inv.email}
+					</div>
+					<div className="text-xs text-gray-600">
+					  Role: {inv.role.replace("_", " ")},{" "}
+					  Expires: {new Date(inv.expiresAt).toLocaleString()}
+					</div>
+				  </div>
+				  <div className="flex items-center gap-2">
+					<button
+					  className="inline-flex items-center rounded-md border border-gray-300 bg-white px-2 py-1 text-xs hover:bg-gray-100"
+					  onClick={() => copy(inv.inviteUrlTemplate ?? "")}
+					  title={
+						inv.inviteUrlTemplate
+						  ? "Copies a link template, create a fresh invite for a full link,"
+						  : "Create a new invite to get a full link,"
+					  }
+					>
+					  <CopyIcon className="mr-1 h-3.5 w-3.5" />
+					  Copy link
+					</button>
+					<button
+					  className="inline-flex items-center rounded-md border border-gray-300 bg-white px-2 py-1 text-xs hover:bg-gray-100"
+					  onClick={() => revokeInvite(inv.id)}
+					>
+					  <Trash2 className="mr-1 h-3.5 w-3.5" />
+					  Revoke
+					</button>
+				  </div>
+				</div>
+			  ))}
+			</div>
+		  )}
+
+		  <p className="mt-3 text-xs text-gray-500">
+			New invites show the code instantly, active invites expire after 15 days,
+		  </p>
+		</Card>
 
         {/* Rename household */}
-        <Card id="rename" title="Rename household" titleIcon={<ShieldCheck className="text-indigo-500" />}>
+        <Card
+          id="rename"
+          title="Rename household"
+		  tone={isConfigure ? "emphasis" : "neutral"}
+          titleIcon={<ShieldCheck className="text-indigo-500" />}
+		  right={
+			isConfigure ? (
+			  <span className="text-[11px] font-semibold uppercase tracking-wide text-rose-500">
+				Start here
+			  </span>
+			) : null
+		  }
+        >
+          <p className="mb-2 text-xs text-gray-600">
+            Property managers and their teams will see this name alongside your applications and
+            leases,
+          </p>
           <div className="flex flex-col gap-2 sm:flex-row">
             <input
               id="rename-card-input"
@@ -693,9 +872,14 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
         </Card>
 
         {/* Leave household */}
-        <Card title="Leave household" titleIcon={<ShieldCheck className="text-indigo-500" />} tone="emphasis">
+        <Card
+          title="Leave household"
+          titleIcon={<ShieldCheck className="text-indigo-500" />}
+          tone="neutral"
+        >
           <p className="text-sm text-gray-600">
-            You’ll be unlinked from this household cluster,
+            You’ll be unlinked from this household cluster, if you join or create a new household
+            later, that one will be used for your next application,
           </p>
           <div className="mt-3">
             <PrimaryButton
@@ -703,7 +887,9 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
               disabled={!canLeave || leaving}
               tone="rose"
             >
-              {leaving ? "Leaving…" : (
+              {leaving ? (
+                "Leaving…"
+              ) : (
                 <>
                   <LogOut className="mr-2 h-4 w-4" /> Leave household
                 </>
@@ -722,8 +908,8 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
       <Modal open={inviteOpen} title="Share household invite" onClose={() => setInviteOpen(false)}>
         <div className="space-y-4">
           {/* Create new invite */}
-          <div className="rounded-md border border-gray-200 p-3">
-            <div className="mb-2 text-xs text-gray-600">Create a new invite</div>
+          <div className="rounded-md border border-gray-200 bg-gray-50 p-3">
+            <div className="mb-2 text-xs font-semibold text-gray-700">Create a new invite</div>
             <div className="flex flex-col gap-2 sm:flex-row">
               <input
                 value={newInviteEmail}
@@ -785,7 +971,7 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
 
           {/* Active invites list */}
           <div>
-            <div className="mb-2 text-xs text-gray-600">Active invites</div>
+            <div className="mb-2 text-xs font-semibold text-gray-700">Active invites</div>
             {invites.length === 0 ? (
               <div className="text-sm text-gray-600">No active invites,</div>
             ) : (
@@ -793,7 +979,7 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
                 {invites.map((inv) => (
                   <div
                     key={inv.id}
-                    className="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-3 py-2"
+                    className="flex items-center justify-between rounded-lg border border-gray-200 bg-white px-3 py-2"
                   >
                     <div className="min-w-0">
                       <div className="truncate text-sm font-medium text-gray-900">{inv.email}</div>
@@ -850,7 +1036,7 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
             <PrimaryButton
               onClick={async () => {
                 setJoinOpen(false);
-                await redeemInvite(joinCode);
+                await redeemInviteById(joinCode);
                 setJoinCode("");
               }}
               disabled={busy || !joinCode || !canJoin}
@@ -928,6 +1114,7 @@ export default function HouseholdDesktop({ cluster }: { cluster: HouseholdCluste
           {toast}
         </div>
       )}
+	  </div>
     </main>
   );
 }

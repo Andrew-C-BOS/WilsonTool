@@ -1,6 +1,8 @@
+// app/tenant/payments/PaymentsRouter.tsx
 import "server-only";
 import PaymentsDesktop from "./PaymentsDesktop";
 import PaymentsMobile from "./PaymentsMobile";
+import type { TenantHomeState } from "@/lib/tenant/homeViewState";
 
 function pickOne(v?: string | string[] | undefined) {
   return Array.isArray(v) ? v[0] : v ?? "";
@@ -13,10 +15,16 @@ type SP =
   | { [k: string]: string | string[] | undefined }
   | Promise<{ [k: string]: string | string[] | undefined }>;
 
+type SessionUser = { email: string | null };
+
 export default async function PaymentsRouter({
   searchParams,
+  user,
+  state,
 }: {
   searchParams?: SP;
+  user: SessionUser;
+  state: TenantHomeState | null;
 }) {
   const sp = (await searchParams) ?? {};
 
@@ -31,10 +39,12 @@ export default async function PaymentsRouter({
 
   const firmId = firmIdRaw || undefined;
 
-  const props: { appId: string; firmId?: string; type: Kind } = {
+  const props = {
     appId,
     firmId,
     type,
+    user,
+    state,
   };
 
   return (
