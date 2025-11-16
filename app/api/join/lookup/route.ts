@@ -29,46 +29,71 @@ export async function GET(req: NextRequest) {
   try {
     const url = new URL(req.url);
     const code = url.searchParams.get("code") || "";
-    if (!code) {
-      return NextResponse.json({ ok: false, error: "missing_code" }, { status: 400 });
-    }
+    if (!code) return json({ ok: false, error: "missing_code" }, 400);
 
     const db = await getDb();
     const invites = db.collection("household_invites");
     const codeHash = sha256(code);
 
-    const inv = await invites.findOne({ codeHash, state: "active" as const });
-    if (!inv) return NextResponse.json({ ok: false, error: "invalid_or_used" }, { status: 404 });
+    const inv = await invites.findOne({ codeHash });
+    if (!inv) return json({ ok: false, error: "invalid_or_used" }, 404);
 
     const now = new Date();
-    if (inv.expiresAt && new Date(inv.expiresAt) < now) {
-      return NextResponse.json({ ok: false, error: "expired" }, { status: 410 });
-    }
+    let status: "active" | "expired" | "redeemed" = "active";
 
-    // Optional: show a household display line if present
+    if (inv.state !== "active") status = "redeemed";
+    if (inv.expiresAt && new Date(inv.expiresAt) < now) status = "expired";
+
+    // early exit on inactive if you want:
+    // if (status !== "active") return json({ ok: false, error: status }, 410/409/...);
+
+    // household label
     let householdLine: string | null = null;
     try {
       const households = db.collection("households");
-      // householdId may be string or ObjectId
       const oid = toMaybeObjectId(inv.householdId);
       const hh =
         (oid && (await households.findOne({ _id: oid }))) ||
         (await households.findOne({ _id: inv.householdId as any }));
       householdLine = (hh?.displayName as string | null) ?? null;
-    } catch {
-      // ignore
+    } catch {}
+
+    // session
+    const user = await getSessionUser();
+    const sessionEmail = user?.email ?? null;
+
+    // compute match
+    let match: InviteMatch;
+    if (!user) {
+      match = "anon";
+    } else {
+      // if you can, check if user is already in that household
+      const alreadyMember = false; // TODO: query household membership
+      if (alreadyMember) {
+        match = "already_member";
+      } else if (
+        sessionEmail &&
+        String(sessionEmail).toLowerCase() === String(inv.email).toLowerCase()
+      ) {
+        match = "email_match";
+      } else {
+        match = "email_mismatch";
+      }
     }
 
-    const user = await getSessionUser();
     return NextResponse.json({
       ok: true,
       invite: {
         emailMasked: maskEmail(String(inv.email || "")),
+        emailRaw: String(inv.email || ""),
         role: (inv.role as "primary" | "co_applicant" | "cosigner") || "co_applicant",
         householdLine,
         expiresAtISO: new Date(inv.expiresAt || now).toISOString(),
+        status,
         isLoggedIn: !!user,
-      },
+        sessionEmail,
+        match,
+      } satisfies InviteMeta,
     });
   } catch (e) {
     console.error("[join.lookup] error", e);

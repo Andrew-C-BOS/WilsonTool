@@ -8,7 +8,6 @@ const LOGIN_HERO_URL =
 
 type Mode = "signin" | "signup";
 
-
 export default function AuthPage() {
   return (
     <Suspense
@@ -37,7 +36,18 @@ function AuthContent() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  // Keep in sync if URL changes (client nav)
+  // Read next param once for convenience
+  const next = searchParams.get("next");
+
+  // Helper to build /register URL while preserving next
+  function buildAuthUrl(nextMode: Mode) {
+    const params = new URLSearchParams();
+    params.set("mode", nextMode);
+    if (next) params.set("next", next);
+    return `/register?${params.toString()}`;
+  }
+
+  // Keep mode in sync if URL changes (client nav)
   useEffect(() => {
     const qp = searchParams.get("mode") as Mode | null;
     if (qp === "signin" || qp === "signup") setMode(qp);
@@ -45,6 +55,7 @@ function AuthContent() {
 
   // Tenant-only self-serve; landlords are admin-only.
   const role = "tenant" as const;
+  const isSignup = mode === "signup";
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -62,57 +73,54 @@ function AuthContent() {
         if (!res.ok || !data.ok) {
           setErr(data.error || "Registration failed");
         } else {
-          router.push("/tenant");
+          // After signup: respect next if present, otherwise default to tenant
+          const redirect = next || "/tenant";
+          router.push(redirect);
           router.refresh();
         }
       } else {
+        // Sign in
         const res = await fetch("/api/auth/login", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ email, password }),
         });
         const data = await res.json();
+
         if (!res.ok || !data.ok) {
           setErr(data.error || "Sign in failed");
-		  } else {
-			const res = await fetch("/api/auth/login", {
-			  method: "POST",
-			  headers: { "Content-Type": "application/json" },
-			  body: JSON.stringify({ email, password }),
-			});
-			const data = await res.json();
+        } else {
+          const user = data.user;
+          const userRole = (user?.role ?? "tenant") as
+            | "tenant"
+            | "landlord"
+            | "admin";
 
-			if (!res.ok || !data.ok) {
-			  setErr(data.error || "Sign in failed");
-			} else {
-			  const user = data.user;
-			  const role = (user?.role ?? "tenant") as "tenant" | "landlord" | "admin";
+          // If there's a next param, always honor it
+          if (next) {
+            router.push(next);
+            router.refresh();
+            return;
+          }
 
-			  let redirect = "/tenant";
+          // Otherwise, role-based default
+          let redirect = "/tenant";
+          if (userRole === "landlord") redirect = "/landlord";
+          else if (userRole === "admin") redirect = "/admin";
 
-			  if (role === "landlord") {
-				redirect = "/landlord";
-			  } else if (role === "admin") {
-				// change this if you want admins to land somewhere else
-				redirect = "/admin";
-			  }
-
-			  router.push(redirect);
-			  router.refresh();
-			}
-		  }
+          router.push(redirect);
+          router.refresh();
+        }
       }
     } catch (e: any) {
       setErr(
-        e.message ||
+        e?.message ||
           (mode === "signup" ? "Registration failed" : "Sign in failed"),
       );
     } finally {
       setBusy(false);
     }
   }
-
-  const isSignup = mode === "signup";
 
   return (
     <main className="relative min-h-screen overflow-hidden bg-slate-950 text-slate-100">
@@ -136,7 +144,7 @@ function AuthContent() {
             <div className="mb-6 flex items-center gap-6 text-sm">
               <button
                 type="button"
-                onClick={() => router.push("/register?mode=signin")}
+                onClick={() => router.push(buildAuthUrl("signin"))}
                 className={`pb-2 transition ${
                   mode === "signin"
                     ? "border-b-2 border-blue-600 font-semibold text-slate-900"
@@ -147,7 +155,7 @@ function AuthContent() {
               </button>
               <button
                 type="button"
-                onClick={() => router.push("/register?mode=signup")}
+                onClick={() => router.push(buildAuthUrl("signup"))}
                 className={`pb-2 transition ${
                   mode === "signup"
                     ? "border-b-2 border-blue-600 font-semibold text-slate-900"
@@ -221,8 +229,7 @@ function AuthContent() {
                 />
                 {isSignup && (
                   <p className="mt-1 text-xs text-slate-500">
-                    Use at least 8 characters, with a mix of letters and
-                    numbers.
+                    Use at least 8 characters, with a mix of letters and numbers.
                   </p>
                 )}
               </div>
@@ -255,7 +262,7 @@ function AuthContent() {
                   Already have an account?{" "}
                   <button
                     type="button"
-                    onClick={() => router.push("/register?mode=signin")}
+                    onClick={() => router.push(buildAuthUrl("signin"))}
                     className="font-medium text-blue-700 hover:underline"
                   >
                     Sign in instead
@@ -267,7 +274,7 @@ function AuthContent() {
                   New to MILO?{" "}
                   <button
                     type="button"
-                    onClick={() => router.push("/register?mode=signup")}
+                    onClick={() => router.push(buildAuthUrl("signup"))}
                     className="font-medium text-blue-700 hover:underline"
                   >
                     Create an account

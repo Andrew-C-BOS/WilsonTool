@@ -110,6 +110,7 @@ export async function GET(req: NextRequest) {
         status: 1,
         property: 1,
         unit: 1,
+		building: 1,
         updatedAt: 1,
         submittedAt: 1,
         tasks: 1,
@@ -196,12 +197,19 @@ export async function GET(req: NextRequest) {
       const me = displayMembers.find((m) => m.id === userId || m.email.toLowerCase() === emailLc);
       const role: MemberRole = (me?.role as MemberRole) ?? "primary";
       const status: AppStatus = (h.status as AppStatus) ?? "draft";
+	  
+	  const buildingAddress =
+        h?.building && typeof h.building === "object"
+          ? h.building.addressLine1 ?? null
+          : null;
+      const displayProperty =
+        (h.property && String(h.property).trim()) || buildingAddress || undefined;
 
       return {
         id: String(h._id),
         formId: String(h.formId),
         formName: nameById.get(String(h.formId)) ?? "Application",
-        property: h.property ?? undefined,
+		property: displayProperty,
         unit: h.unit ?? undefined,
         role,
         status,

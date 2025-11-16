@@ -7,40 +7,52 @@ function clsx(...xs: (string | false | null | undefined)[]) {
   return xs.filter(Boolean).join(" ");
 }
 
+// Server should drive these; keep them tolerant while you wire APIs
+type InviteMatch = "anon" | "email_match" | "email_mismatch" | "already_member";
+
+type InviteMeta = {
+  emailMasked: string;
+  emailRaw?: string;
+  role: "primary" | "co_applicant" | "cosigner";
+  householdLine?: string | null;
+  expiresAtISO: string;
+  status?: "active" | "expired" | "redeemed";
+  isLoggedIn: boolean;
+  sessionEmail?: string | null;
+  match?: InviteMatch;
+};
+
 type LookupResp =
   | {
       ok: true;
-      invite: {
-        emailMasked: string;
-        role: "primary" | "co_applicant" | "cosigner";
-        householdLine?: string | null;
-        expiresAtISO: string;
-        isLoggedIn: boolean;
-      };
+      invite: InviteMeta;
     }
   | { ok: false; error: string };
+
+type Stage =
+  | "loading"
+  | "invalid"        // invalid/expired/used
+  | "anon"           // not logged in
+  | "confirm_join"   // email_match
+  | "mismatch"       // email_mismatch
+  | "verify"         // OTP entry
+  | "already_member";
 
 export default function JoinClient({ code }: { code: string }) {
   const router = useRouter();
 
-  const [stage, setStage] = useState<"lookup" | "send" | "verify">("lookup");
+  const [stage, setStage] = useState<Stage>("loading");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const [meta, setMeta] = useState<{
-    emailMasked: string;
-    role: "primary" | "co_applicant" | "cosigner";
-    householdLine?: string | null;
-    expiresAtISO: string;
-    isLoggedIn: boolean;
-  } | null>(null);
+  const [meta, setMeta] = useState<InviteMeta | null>(null);
 
   const [otp, setOtp] = useState("");
   const [resendAt, setResendAt] = useState<number>(0);
   const [now, setNow] = useState<number>(() => Date.now());
   const otpRef = useRef<HTMLInputElement | null>(null);
 
-  // NEW: prompt to allow switching session to invited account
+  // Whether we need an extra confirm when server says "wrong_email"
   const [needsSwitchConfirm, setNeedsSwitchConfirm] = useState(false);
 
   const resendSeconds = useMemo(() => {
@@ -54,22 +66,100 @@ export default function JoinClient({ code }: { code: string }) {
     return () => clearInterval(id);
   }, [resendAt]);
 
+  /* ───────────────────────────────────────────────────────────
+     Lookup: figure out what kind of flow this is
+  ─────────────────────────────────────────────────────────── */
   async function lookup() {
     setBusy(true);
     setError(null);
+    setStage("loading");
+
     try {
-      const res = await fetch(`/api/join/lookup?code=${encodeURIComponent(code)}`, { cache: "no-store" });
+      const res = await fetch(
+        `/api/join/lookup?code=${encodeURIComponent(code)}`,
+        { cache: "no-store" },
+      );
       const json: LookupResp = await res.json();
-      if (!json.ok) throw new Error(json.error || "invalid_link");
-      setMeta(json.invite);
-      setStage("send");
+      if (!json.ok) {
+        setError(json.error || "This invite is no longer active,");
+        setStage("invalid");
+        return;
+      }
+
+      const invite = json.invite;
+      setMeta(invite);
+
+      const status = invite.status ?? "active";
+
+      if (status !== "active") {
+        setError("This invite is no longer active,");
+        setStage("invalid");
+        return;
+      }
+
+      // Fallback if match not provided yet
+      const match: InviteMatch =
+        invite.match ||
+        (!invite.isLoggedIn
+          ? "anon"
+          : "email_match"); // temporary default until backend wired
+
+      switch (match) {
+        case "anon":
+          setStage("anon");
+          break;
+        case "email_match":
+          setStage("confirm_join");
+          break;
+        case "email_mismatch":
+          setStage("mismatch");
+          break;
+        case "already_member":
+          setStage("already_member");
+          break;
+        default:
+          setStage("anon");
+      }
     } catch (e: any) {
       setError(e?.message || "Something went wrong,");
+      setStage("invalid");
     } finally {
       setBusy(false);
     }
   }
 
+  /* ───────────────────────────────────────────────────────────
+     Direct join when email matches
+  ─────────────────────────────────────────────────────────── */
+  async function joinDirect() {
+    if (!meta) return;
+    setBusy(true);
+    setError(null);
+
+    try {
+      const res = await fetch("/api/join/simple", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code }),
+      });
+      const json = await res.json();
+
+      if (!res.ok || !json?.ok) {
+        throw new Error(json?.error || "Couldn’t join this household,");
+      }
+
+      router.replace("/tenant/household");
+      router.refresh();
+    } catch (e: any) {
+      setError(e?.message || "Couldn’t join this household,");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /* ───────────────────────────────────────────────────────────
+     OTP send/verify path (for mismatch flow)
+  ─────────────────────────────────────────────────────────── */
   async function sendVerification() {
     if (resendSeconds > 0) return;
     setBusy(true);
@@ -89,20 +179,20 @@ export default function JoinClient({ code }: { code: string }) {
           setResendAt(Date.now() + 30_000);
           return;
         }
-        throw new Error(json?.error || "send_failed");
+        throw new Error(json?.error || "Couldn’t send the verification email,");
       }
 
       setResendAt(Date.now() + 30_000);
       setTimeout(() => otpRef.current?.focus(), 0);
     } catch (e: any) {
-      setStage("send");
+      // Go back to mismatch screen on failure
+      setStage("mismatch");
       setError(e?.message || "Couldn’t send the verification email,");
     } finally {
       setBusy(false);
     }
   }
 
-  // UPDATED: allow forcing a switch when server says wrong_email
   async function completeJoin(opts?: { forceSwitch?: boolean }) {
     const clean = otp.replace(/\D/g, "").slice(0, 6);
     if (clean.length !== 6) {
@@ -118,7 +208,11 @@ export default function JoinClient({ code }: { code: string }) {
       const res = await fetch(`/api/join/complete`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code, otp: clean, switch: !!opts?.forceSwitch }),
+        body: JSON.stringify({
+          code,
+          otp: clean,
+          switch: !!opts?.forceSwitch,
+        }),
       });
       const json = await res.json();
 
@@ -128,7 +222,7 @@ export default function JoinClient({ code }: { code: string }) {
           setError("This invite is for a different email,");
           return;
         }
-        throw new Error(json?.error || "verify_failed");
+        throw new Error(json?.error || "Verification failed,");
       }
 
       router.replace("/tenant/household");
@@ -152,11 +246,23 @@ export default function JoinClient({ code }: { code: string }) {
     }
   }
 
+  /* ───────────────────────────────────────────────────────────
+     Initial lookup
+  ─────────────────────────────────────────────────────────── */
   useEffect(() => {
     lookup();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const invitedEmail = meta?.emailMasked ?? "";
+  const sessionEmail = meta?.sessionEmail ?? null;
+
+  const loginUrl = `/register?mode=signin&next=${encodeURIComponent(`/join/${code}`)}`;
+  const signupUrl = `/register?mode=signup&next=${encodeURIComponent(`/join/${code}`)}`;
+
+  /* ───────────────────────────────────────────────────────────
+     Render
+  ─────────────────────────────────────────────────────────── */
   return (
     <div>
       {error && (
@@ -165,54 +271,188 @@ export default function JoinClient({ code }: { code: string }) {
         </div>
       )}
 
-      {stage === "lookup" && <div className="text-sm text-gray-600">Checking your invite…</div>}
+      {/* Only show "Checking…" when truly loading and no fatal error */}
+      {stage === "loading" && !error && (
+        <div className="text-sm text-gray-600">Checking your invite…</div>
+      )}
 
-      {stage !== "lookup" && meta && (
+      {meta && stage !== "loading" && (
         <>
+          {/* Invite summary */}
           <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm">
             <div className="text-gray-700">
-              <span className="font-semibold">Invited email:</span> {meta.emailMasked}
+              <span className="font-semibold">Invited email:</span>{" "}
+              {meta.emailMasked}
             </div>
             <div className="text-gray-700">
-              <span className="font-semibold">Role:</span> {meta.role.replace("_", " ")}
+              <span className="font-semibold">Role:</span>{" "}
+              {meta.role.replace("_", " ")}
             </div>
             {meta.householdLine && (
               <div className="text-gray-700">
-                <span className="font-semibold">Household:</span> {meta.householdLine}
+                <span className="font-semibold">Household:</span>{" "}
+                {meta.householdLine}
               </div>
             )}
             <div className="text-gray-700">
               <span className="font-semibold">Expires:</span>{" "}
               {new Date(meta.expiresAtISO).toLocaleString()}
             </div>
+            {sessionEmail && (
+              <div className="mt-1 text-[11px] text-gray-500">
+                You’re currently logged in as{" "}
+                <span className="font-semibold">{sessionEmail}</span>,
+              </div>
+            )}
           </div>
 
-          {stage === "send" && (
-            <div className="mt-4">
-              <button
-                onClick={sendVerification}
-                disabled={busy}
-                className={clsx(
-                  "inline-flex w-full items-center justify-center rounded-lg px-4 py-2 text-sm font-semibold",
-                  busy ? "bg-gray-300 text-gray-600" : "bg-gray-900 text-white hover:bg-black"
-                )}
-              >
-                {busy ? "Sending…" : `Send verification code to ${meta.emailMasked}`}
-              </button>
-              {!meta.isLoggedIn && (
-                <p className="mt-2 text-center text-xs text-gray-500">
-                  No account? We’ll create one after you verify this email,
-                </p>
-              )}
+          {/* Invalid / inactive invite */}
+          {stage === "invalid" && (
+            <div className="mt-4 rounded-xl border border-gray-200 bg-white p-4 text-sm text-gray-700">
+              <div className="font-semibold text-gray-900">
+                This invite is no longer active,
+              </div>
+              <p className="mt-1 text-xs text-gray-600">
+                The link may have expired or already been used. Reach out to your
+                property manager if you believe this is a mistake,
+              </p>
             </div>
           )}
 
+          {/* Stage: anonymous user */}
+          {stage === "anon" && (
+            <div className="mt-4 space-y-3 text-sm">
+              <p className="text-gray-700">
+                To join this household, log in or create an account. Once you’re signed
+                in, we’ll attach this invite to your tenant profile,
+              </p>
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <button
+                  type="button"
+                  onClick={() => router.push(loginUrl)}
+                  className="inline-flex flex-1 items-center justify-center rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50"
+                >
+                  Sign in
+                </button>
+                <button
+                  type="button"
+                  onClick={() => router.push(signupUrl)}
+                  className="inline-flex flex-1 items-center justify-center rounded-lg bg-gray-900 px-4 py-2 text-sm font-semibold text-white hover:bg-black"
+                >
+                  Create account
+                </button>
+              </div>
+              <p className="text-xs text-gray-500">
+                Use the same email this invite was sent to if possible,
+              </p>
+            </div>
+          )}
+
+          {/* Stage: already member */}
+          {stage === "already_member" && (
+            <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
+              <div className="font-semibold">
+                You’re already part of this household,
+              </div>
+              <p className="mt-1 text-xs text-emerald-800">
+                You don’t need to do anything else with this invite,
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  router.replace("/tenant/household");
+                  router.refresh();
+                }}
+                className="mt-3 inline-flex items-center justify-center rounded-md bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700"
+              >
+                Go to your household
+              </button>
+            </div>
+          )}
+
+          {/* Stage: email match – simple confirm and join */}
+          {stage === "confirm_join" && (
+            <div className="mt-4 space-y-3 text-sm">
+              <p className="text-gray-700">
+                This invite was sent to{" "}
+                <span className="font-semibold">{invitedEmail}</span>, and you’re
+                logged in as{" "}
+                <span className="font-semibold">{sessionEmail}</span>. You can join
+                this household with your current account,
+              </p>
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <button
+                  type="button"
+                  onClick={joinDirect}
+                  disabled={busy}
+                  className={clsx(
+                    "inline-flex flex-1 items-center justify-center rounded-lg px-4 py-2 text-sm font-semibold",
+                    busy
+                      ? "bg-gray-300 text-gray-600"
+                      : "bg-gray-900 text-white hover:bg-black",
+                  )}
+                >
+                  {busy ? "Joining…" : "Join this household"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => router.push(loginUrl)}
+                  className="inline-flex flex-1 items-center justify-center rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50"
+                >
+                  Switch accounts
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Stage: mismatch – explain, then offer verify path */}
+          {stage === "mismatch" && (
+            <div className="mt-4 space-y-3 text-sm">
+              <p className="text-gray-700">
+                This invite was sent to{" "}
+                <span className="font-semibold">{invitedEmail}</span>, but you’re
+                currently signed in as{" "}
+                <span className="font-semibold">
+                  {sessionEmail || "your current account"}
+                </span>.
+              </p>
+              <p className="text-xs text-gray-600">
+                If you meant to join as the invited email, switch accounts and sign in
+                with that address. If you want to join with your current account instead,
+                we’ll send you a verification code to confirm,
+              </p>
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <button
+                  type="button"
+                  onClick={() => router.push(loginUrl)}
+                  className="inline-flex flex-1 items-center justify-center rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50"
+                >
+                  Switch accounts
+                </button>
+                <button
+                  type="button"
+                  onClick={sendVerification}
+                  disabled={busy}
+                  className={clsx(
+                    "inline-flex flex-1 items-center justify-center rounded-lg px-4 py-2 text-sm font-semibold",
+                    busy
+                      ? "bg-gray-300 text-gray-600"
+                      : "bg-indigo-600 text-white hover:bg-indigo-700",
+                  )}
+                >
+                  {busy ? "Sending…" : "Verify & join with this account"}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Stage: verify – OTP entry */}
           {stage === "verify" && (
             <div className="mt-4 space-y-3">
-              {/* Switch confirm banner */}
               {needsSwitchConfirm && (
                 <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
-                  This invite was sent to a different email, you can switch to the invited account, and continue,
+                  This invite was sent to a different email, you can switch to the invited
+                  account and continue,
                   <div className="mt-2 flex gap-2">
                     <button
                       onClick={() => completeJoin({ forceSwitch: true })}
@@ -231,7 +471,9 @@ export default function JoinClient({ code }: { code: string }) {
               )}
 
               <div>
-                <label className="text-sm font-medium text-gray-900">Verification code</label>
+                <label className="text-sm font-medium text-gray-900">
+                  Verification code
+                </label>
                 <input
                   ref={otpRef}
                   value={otp}
@@ -242,7 +484,9 @@ export default function JoinClient({ code }: { code: string }) {
                   placeholder="6-digit code"
                   className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm tracking-widest"
                 />
-                <p className="mt-1 text-xs text-gray-500">Enter the 6-digit code we emailed you,</p>
+                <p className="mt-1 text-xs text-gray-500">
+                  Enter the 6-digit code we emailed you,
+                </p>
               </div>
 
               <div className="flex flex-col gap-2 sm:flex-row">
@@ -253,7 +497,7 @@ export default function JoinClient({ code }: { code: string }) {
                     "inline-flex flex-1 items-center justify-center rounded-lg px-4 py-2 text-sm font-semibold",
                     busy || otp.length !== 6
                       ? "bg-gray-300 text-gray-600"
-                      : "bg-indigo-600 text-white hover:bg-indigo-700"
+                      : "bg-indigo-600 text-white hover:bg-indigo-700",
                   )}
                 >
                   {busy ? "Verifying…" : "Verify & Join"}
@@ -264,16 +508,25 @@ export default function JoinClient({ code }: { code: string }) {
                   disabled={busy || resendSeconds > 0}
                   className={clsx(
                     "inline-flex flex-1 items-center justify-center rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold",
-                    resendSeconds > 0 ? "text-gray-500" : "text-gray-900 hover:bg-gray-50"
+                    resendSeconds > 0
+                      ? "text-gray-500"
+                      : "text-gray-900 hover:bg-gray-50",
                   )}
-                  title={resendSeconds > 0 ? `You can resend in ${resendSeconds}s` : "Resend code"}
+                  title={
+                    resendSeconds > 0
+                      ? `You can resend in ${resendSeconds}s`
+                      : "Resend code"
+                  }
                 >
-                  {resendSeconds > 0 ? `Resend in ${resendSeconds}s` : "Resend code"}
+                  {resendSeconds > 0
+                    ? `Resend in ${resendSeconds}s`
+                    : "Resend code"}
                 </button>
               </div>
 
               <p className="text-xs text-gray-500">
-                If you’re logged in and your current household has multiple members, you won’t be able to switch,
+                If you’re logged in and your current household has multiple members, you won’t
+                be able to switch,
               </p>
             </div>
           )}

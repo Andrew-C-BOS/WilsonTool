@@ -209,7 +209,7 @@ export default function ApplicationsClient() {
               formId: String(a.formId),
               formName: String(a.formName ?? "Application"),
               property: a.property ?? undefined,
-              unit: a.unit ?? undefined,
+              unit: a.unit.unitNumber ?? undefined,
               status: a.status as AppStatus,
               updatedAt: String(a.updatedAt ?? ""),
               submittedAt: a.submittedAt ? String(a.submittedAt) : undefined,
@@ -527,10 +527,10 @@ export default function ApplicationsClient() {
                       </div>
 
                       {(a.property || a.unit) && (
-                        <div className="mt-0.5 truncate text-xs text-gray-600">
-                          {a.property}
-                          {a.unit ? ` · Unit ${a.unit}` : ""}
-                        </div>
+						<div className="mt-0.5 text-xs text-gray-600 space-y-0.5">
+						  <div className="font-medium text-gray-700">{a.property}</div>
+						  {a.unit && <div className="text-gray-500">Unit {a.unit}</div>}
+						</div>
                       )}
 
                       <div className="mt-1 flex flex-wrap items-center gap-2">

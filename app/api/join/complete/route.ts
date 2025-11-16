@@ -1,9 +1,9 @@
 // app/api/join/complete/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { createHash, randomBytes } from "crypto";
+import { createHash } from "crypto";
 import { ObjectId } from "mongodb";
 import { getDb } from "@/lib/db";
-import { getSessionUser, createSession, createUser } from "@/lib/auth";
+import { getSessionUser } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -49,21 +49,20 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const code = String(body?.code || "");
-    const otp = String(body?.otp || "");
-    const doSwitch = body?.switch === true; // ← allow explicit switch to invited account
+    const otpRaw = body?.otp;
+    const otp = typeof otpRaw === "string" ? otpRaw.trim() : "";
 
-    if (!code || !otp) {
+    if (!code) {
       return NextResponse.json(
-        { ok: false, error: "missing_params" },
-        { status: 400 }
+        { ok: false, error: "missing_code" },
+        { status: 400 },
       );
     }
 
     const db = await getDb();
     const invites = db.collection("household_invites");
     const memberships = db.collection("household_memberships");
-    const membershipsLegacy = db.collection("household_memberhsips"); // legacy typo
-    const usersCol = db.collection("users");
+    const membershipsLegacy = db.collection("household_memberhsips");
     const households = db.collection("households");
 
     const codeHash = sha256(code);
@@ -71,47 +70,40 @@ export async function POST(req: NextRequest) {
     if (!inv) {
       return NextResponse.json(
         { ok: false, error: "invalid_or_used" },
-        { status: 404 }
+        { status: 404 },
       );
     }
 
     const now = new Date();
-    if (inv.expiresAt && new Date(inv.expiresAt) < now) {
+    const nowISO = now.toISOString();
+    const expiresAt = inv.expiresAt ? new Date(inv.expiresAt) : null;
+
+    if (expiresAt && expiresAt < now) {
       return NextResponse.json(
-        { ok: false, error: "expired" },
-        { status: 410 }
+        {
+          ok: false,
+          error: "expired",
+          expiredAtISO: expiresAt.toISOString(),
+          nowISO,
+        },
+        { status: 410 },
       );
     }
 
-    // OTP checks
-    if (!inv.verifyCodeHash || !inv.verifyExpiresAt) {
+    // ✅ Require logged-in user
+    const sessionUser = (await getSessionUser()) as UserDocLike | null;
+    if (!sessionUser) {
       return NextResponse.json(
-        { ok: false, error: "not_started" },
-        { status: 400 }
-      );
-    }
-    if (new Date(inv.verifyExpiresAt) < now) {
-      return NextResponse.json(
-        { ok: false, error: "otp_expired" },
-        { status: 410 }
-      );
-    }
-    if (sha256(otp.trim()) !== inv.verifyCodeHash) {
-      await invites.updateOne(
-        { _id: inv._id },
-        { $inc: { verifyAttempts: 1 } }
-      );
-      return NextResponse.json(
-        { ok: false, error: "otp_invalid" },
-        { status: 401 }
+        { ok: false, error: "not_logged_in" },
+        { status: 403 },
       );
     }
 
-    // Verified email (via OTP) is the invite's email
+    const suId = userIdString(sessionUser);
+    const suEmail = userEmailLower(sessionUser);
     const joinEmail = lc(inv.email || "");
-    let sessionUser = await getSessionUser(); // may be null
 
-    // Household lookup (string/ObjectId tolerant)
+    // Normalize householdId to a STRING for membership docs
     const targetHIdStr = toStringId(inv.householdId);
     const targetHIdObj = toMaybeObjectId(targetHIdStr);
     const household =
@@ -121,215 +113,210 @@ export async function POST(req: NextRequest) {
     if (!household) {
       return NextResponse.json(
         { ok: false, error: "household_not_found" },
-        { status: 404 }
+        { status: 404 },
       );
     }
 
-    if (sessionUser) {
-      // Logged-in flow
-      const suId = toStringId(
-        (sessionUser as any)._id ??
-          (sessionUser as any).id ??
-          (sessionUser as any).userId
-      );
-      const suEmail = lc((sessionUser as any).email);
+    const sameEmail = suEmail === joinEmail;
 
-      if (suEmail !== joinEmail) {
-        // If emails don't match and client didn't request a switch, hint the client UI
-        if (!doSwitch) {
-          return NextResponse.json(
-            { ok: false, error: "wrong_email", suggest: ["switch_account"] },
-            { status: 403 }
-          );
-        }
+    // Only require OTP if user is logged in with a different email than invite email
+    if (!sameEmail) {
+      const verifyExpiresAt = inv.verifyExpiresAt
+        ? new Date(inv.verifyExpiresAt)
+        : null;
 
-        // ✅ Switch to invited account:
-        // create/reuse invited user, replace session, upsert membership, redeem invite
-        let userDoc =
-          (await usersCol.findOne({
-            email: joinEmail,
-          })) as UserDocLike | null;
-
-        if (!userDoc) {
-          const tempPassword = randomBytes(16).toString("hex");
-          const created = await createUser(joinEmail, tempPassword, "tenant");
-          userDoc = created as UserDocLike;
-        }
-
-        await createSession(userDoc as any); // overwrite cookie → effectively logs out prior user
-
-        const uId = userIdString(userDoc);
-
-        await memberships.updateOne(
-          {
-            userId: uId,
-            householdId: targetHIdObj ?? targetHIdStr,
-          },
-          {
-            $set: {
-              userId: uId,
-              email: joinEmail,
-              householdId: targetHIdObj ?? targetHIdStr,
-              role: inv.role || "co_applicant",
-              active: true,
-              updatedAt: now,
-            },
-            $setOnInsert: {
-              joinedAt: now,
-              name: userDoc.preferredName ?? null,
-            },
-          },
-          { upsert: true }
+      if (!inv.verifyCodeHash || !verifyExpiresAt) {
+        return NextResponse.json(
+          { ok: false, error: "not_started" },
+          { status: 400 },
         );
-
+      }
+      if (verifyExpiresAt < now) {
+        return NextResponse.json(
+          {
+            ok: false,
+            error: "otp_expired",
+            otpExpiredAtISO: verifyExpiresAt.toISOString(),
+            nowISO,
+          },
+          { status: 410 },
+        );
+      }
+      if (!otp) {
+        return NextResponse.json(
+          { ok: false, error: "missing_otp" },
+          { status: 400 },
+        );
+      }
+      if (sha256(otp) !== inv.verifyCodeHash) {
         await invites.updateOne(
           { _id: inv._id },
-          {
-            $set: {
-              state: "redeemed",
-              redeemedAt: now,
-              redeemedBy: uId,
-              switchedAccount: true, // small audit flag
-            },
-          }
+          { $inc: { verifyAttempts: 1 } },
         );
-
-        return NextResponse.json({
-          ok: true,
-          joined: true,
-          createdAccount: false,
-          switchedAccount: true,
-        });
+        return NextResponse.json(
+          { ok: false, error: "otp_invalid" },
+          { status: 401 },
+        );
       }
+    }
 
-      // Same-email, normal logged-in flow
-      const activeMem =
-        (await memberships.findOne({
-          active: true,
-          $or: [{ userId: suId }, { email: suEmail }],
-        })) ||
-        (await membershipsLegacy.findOne({
-          active: true,
-          $or: [{ userId: suId }, { email: suEmail }],
-        }));
-
-      if (activeMem) {
-        const hId = activeMem.householdId;
-        const [cntA, cntB] = await Promise.all([
-          memberships.countDocuments({
-            householdId: hId,
-            active: { $in: [true, false] },
-          }),
-          membershipsLegacy.countDocuments({
-            householdId: hId,
-            active: { $in: [true, false] },
-          }),
-        ]);
-        if (cntA + cntB > 1) {
-          return NextResponse.json(
-            { ok: false, error: "household_multi_member_block" },
-            { status: 409 }
-          );
-        }
-      }
-
-      await memberships.updateOne(
-        {
-          userId: suId,
-          householdId: targetHIdObj ?? targetHIdStr,
-        },
-        {
-          $set: {
-            userId: suId,
-            email: suEmail,
-            householdId: targetHIdObj ?? targetHIdStr,
-            role: inv.role || "co_applicant",
-            active: true,
-            updatedAt: now,
-          },
-          $setOnInsert: {
-            joinedAt: now,
-            name: (sessionUser as any).preferredName ?? null,
-          },
-        },
-        { upsert: true }
-      );
-
+    // Helper: mark invite redeemed with audit, leave `email` untouched
+    async function markInviteRedeemed(
+      redeemedByUserId: string,
+      redeemedByEmail: string,
+      extras?: Record<string, any>,
+    ) {
       await invites.updateOne(
         { _id: inv._id },
         {
           $set: {
             state: "redeemed",
             redeemedAt: now,
-            redeemedBy: suId,
+            redeemedBy: redeemedByUserId,
+            redeemedByEmail: redeemedByEmail,
+            redeemedToAlternate: !sameEmail,
+            ...(extras || {}),
           },
-        }
+        },
       );
+    }
 
+    // Helper: upsert membership in string-ID shape
+    async function upsertMembership(
+      userIdStr: string,
+      emailLower: string,
+      preferredName: string | null,
+      role: string,
+    ) {
+      const doc = {
+        userId: userIdStr,
+        email: emailLower,
+        householdId: targetHIdStr,
+        role: role || "co_applicant",
+        active: true,
+        updatedAt: now,
+      };
+
+      await memberships.updateOne(
+        {
+          userId: userIdStr,
+          householdId: targetHIdStr,
+        },
+        {
+          $set: doc,
+          $setOnInsert: {
+            _id: new ObjectId().toHexString(), // string _id
+            joinedAt: now,
+            name: preferredName,
+          },
+        },
+        { upsert: true },
+      );
+    }
+
+    // Helper: find all active memberships for this user across households
+    async function getActiveMembershipsForUser() {
+      const query = { userId: suId, active: true };
+      const [m1, m2] = await Promise.all([
+        memberships.find(query).toArray(),
+        membershipsLegacy.find(query).toArray(),
+      ]);
+      return [...m1, ...m2];
+    }
+
+    // 1) Gather active memberships for this user
+    const activeMems = await getActiveMembershipsForUser();
+
+    const activeInTarget = activeMems.filter(
+      (m: any) => String(m.householdId) === targetHIdStr,
+    );
+    const activeInOtherHouseholds = activeMems.filter(
+      (m: any) => String(m.householdId) !== targetHIdStr,
+    );
+
+    // 2) If already active in the target household, just redeem invite and return
+    if (activeInTarget.length > 0) {
+      await markInviteRedeemed(suId, suEmail, { alreadyMember: true });
       return NextResponse.json({
         ok: true,
-        joined: true,
-        createdAccount: false,
+        joined: false,
+        alreadyMember: true,
       });
     }
 
-    // Logged-out flow → create or reuse user by invite email, then session, then membership
-    let userDoc =
-      (await usersCol.findOne({
-        email: inv.email,
-      })) as UserDocLike | null;
+    // 3) If user has active membership(s) in other households, check if those
+    //    households have any other active members. If yes, we must block.
+    if (activeInOtherHouseholds.length > 0) {
+      // we’ll treat any other active household as a reason to block
+      for (const mem of activeInOtherHouseholds) {
+        const hIdStr = String(mem.householdId);
 
-    if (!userDoc) {
-      const tempPassword = randomBytes(16).toString("hex");
-      const created = await createUser(String(inv.email), tempPassword, "tenant");
-      userDoc = created as UserDocLike;
+        const otherActiveQuery = {
+          householdId: hIdStr,
+          active: true,
+          userId: { $ne: suId },
+        };
+
+        const [other1, other2] = await Promise.all([
+          memberships.findOne(otherActiveQuery),
+          membershipsLegacy.findOne(otherActiveQuery),
+        ]);
+
+        if (other1 || other2) {
+          // Found another active member on the user's current household
+          return NextResponse.json(
+            {
+              ok: false,
+              error: "existing_household_multi_member_block",
+              householdId: hIdStr,
+            },
+            { status: 409 },
+          );
+        }
+      }
+
+      // If we reach here, the user has active memberships in other households,
+      // but they are the only active member in each. We can safely deactivate them.
+      await memberships.updateMany(
+        {
+          userId: suId,
+          active: true,
+          householdId: { $nin: [targetHIdStr] },
+        },
+        { $set: { active: false, updatedAt: now } },
+      );
+      await membershipsLegacy.updateMany(
+        {
+          userId: suId,
+          active: true,
+          householdId: { $nin: [targetHIdStr] },
+        },
+        { $set: { active: false, updatedAt: now } },
+      );
     }
 
-    await createSession(userDoc as any);
-
-    const uId = userIdString(userDoc);
-    const uEmail = userEmailLower(userDoc);
-
-    await memberships.updateOne(
-      { userId: uId, householdId: targetHIdObj ?? targetHIdStr },
-      {
-        $set: {
-          userId: uId,
-          email: uEmail,
-          householdId: targetHIdObj ?? targetHIdStr,
-          role: inv.role || "co_applicant",
-          active: true,
-          updatedAt: now,
-        },
-        $setOnInsert: {
-          joinedAt: now,
-          name: userDoc.preferredName ?? null,
-        },
-      },
-      { upsert: true }
+    // 4) At this point, there are no conflicting active households or they've been deactivated.
+    //    Proceed to create/upsert membership in the target household.
+    await upsertMembership(
+      suId,
+      suEmail,
+      (sessionUser as any).preferredName ?? null,
+      inv.role || "co_applicant",
     );
 
-    await invites.updateOne(
-      { _id: inv._id },
-      {
-        $set: {
-          state: "redeemed",
-          redeemedAt: now,
-          redeemedBy: uId,
-        },
-      }
-    );
+    await markInviteRedeemed(suId, suEmail);
 
     return NextResponse.json({
       ok: true,
       joined: true,
-      createdAccount: true,
+      createdAccount: false,
+      redeemedToAlternate: !sameEmail,
     });
   } catch (e) {
     console.error("[join.complete] error", e);
     return NextResponse.json(
       { ok: false, error: "server_error" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }
