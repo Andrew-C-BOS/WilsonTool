@@ -457,6 +457,53 @@ async function recomputeAndMaybeFlip(opts: {
   };
 }
 
+async function linkUserDefaultUsBankPm(
+  pi: Stripe.PaymentIntent,
+  charge: Stripe.Charge | null,
+  users: any,
+  debugMode: boolean,
+  debug: any
+) {
+  try {
+    const pmId =
+      typeof pi.payment_method === "string" ? pi.payment_method : null;
+    const customerId =
+      typeof pi.customer === "string" ? pi.customer : null;
+    const isUsBank =
+      charge?.payment_method_details?.type === "us_bank_account" ||
+      (pi.payment_method_types?.length === 1 &&
+        pi.payment_method_types[0] === "us_bank_account");
+
+    if (pmId && customerId && isUsBank) {
+      const userUpdateRes = await users.updateOne(
+        { stripeCustomerId: customerId },
+        { $set: { defaultUsBankPaymentMethodId: pmId } }
+      );
+
+      dpush(debugMode ? debug : null, "user_pm_linked", {
+        status: pi.status,
+        customerId,
+        paymentMethodId: pmId,
+        matched: userUpdateRes.matchedCount,
+        modified: userUpdateRes.modifiedCount,
+      });
+    } else {
+      dpush(debugMode ? debug : null, "user_pm_skip", {
+        status: pi.status,
+        pmId,
+        customerId,
+        isUsBank,
+      });
+    }
+  } catch (err: any) {
+    dpush(
+      debugMode ? debug : null,
+      "user_pm_error",
+      String(err?.message || err),
+    );
+  }
+}
+
 /* ───────────────────────────────────────────────────────────
    WEBHOOK
 ─────────────────────────────────────────────────────────── */
@@ -503,6 +550,7 @@ export async function POST(req: Request) {
     const payments = db.collection("payments") as any;
     const applications = db.collection("applications") as any;
     const firms = db.collection("firms") as any;
+	const users = db.collection("users") as any;
 
     const paymentIntentId = pi.id;
     const status = pi.status;
@@ -653,6 +701,9 @@ export async function POST(req: Request) {
             },
           }
         );
+		
+		await linkUserDefaultUsBankPm(pi, charge, users, debugMode, debug);
+		
         break;
       }
 
@@ -668,6 +719,9 @@ export async function POST(req: Request) {
             },
           }
         );
+		
+		await linkUserDefaultUsBankPm(pi, charge, users, debugMode, debug);
+
 
 const bucket = effectiveKind === "deposit" ? "deposit" : "upfront";
 

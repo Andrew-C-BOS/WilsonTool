@@ -589,7 +589,7 @@ function AddApplicationCard({ highlightPrimary }: { highlightPrimary?: boolean }
           Go To Application Page
         </Link>
         <Link
-          href="/tenant/applications/join"
+          href="/tenant/applications?openSearch=1"
           className="inline-flex items-center justify-center rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-900 hover:bg-slate-50"
         >
           Enter invite code

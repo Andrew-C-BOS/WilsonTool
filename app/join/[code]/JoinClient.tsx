@@ -137,7 +137,7 @@ export default function JoinClient({ code }: { code: string }) {
     setError(null);
 
     try {
-      const res = await fetch("/api/join/simple", {
+      const res = await fetch("/api/join/complete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ code }),

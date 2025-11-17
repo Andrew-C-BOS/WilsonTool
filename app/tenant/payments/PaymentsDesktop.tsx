@@ -6,19 +6,27 @@ import { Elements, PaymentElement, useElements, useStripe } from "@stripe/react-
 /* ─────────────────────────────────────────────────────────────
    Local helpers
 ───────────────────────────────────────────────────────────── */
-function clsx(...xs: (string | false | null | undefined)[]) { return xs.filter(Boolean).join(" "); }
+function clsx(...xs: (string | false | null | undefined)[]) {
+  return xs.filter(Boolean).join(" ");
+}
 const log = (...args: any[]) => console.log("[payments]", ...args);
 
 function money(cents?: number) {
-  return new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 2 })
-    .format((cents || 0) / 100);
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 2,
+  }).format((cents || 0) / 100);
 }
 let stripePromise: Promise<import("@stripe/stripe-js").Stripe | null> | null = null;
 async function getStripe() {
   if (!stripePromise) {
     stripePromise = (async () => {
       const pk = process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY;
-      if (!pk) { console.error("Missing NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY"); return null; }
+      if (!pk) {
+        console.error("Missing NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY");
+        return null;
+      }
       const { loadStripe } = await import("@stripe/stripe-js");
       return loadStripe(pk);
     })();
@@ -53,7 +61,7 @@ type PaymentLite = {
   createdAt: string;
   updatedAt?: string;
 };
-type AllocationByCharge = { chargeKey: string; postedCents: number; pendingCents: number; };
+type AllocationByCharge = { chargeKey: string; postedCents: number; pendingCents: number };
 type MoneyView = {
   dueUpfrontCents: number;
   dueDepositCents: number;
@@ -86,41 +94,96 @@ type ChargesApi = {
     upfrontMet: boolean | null;
     depositMet: boolean | null;
   };
-  windows?: { dueNowCents: number; dueBeforeMoveInCents: number; dueNext30Cents: number; laterCents: number; moveInDateISO: string | null; };
-  nextRent?: { ym: string; dueDateISO: string | null; amountCents: number; remainingCents: number } | null;
+  windows?: {
+    dueNowCents: number;
+    dueBeforeMoveInCents: number;
+    dueNext30Cents: number;
+    laterCents: number;
+    moveInDateISO: string | null;
+  };
+  nextRent?: {
+    ym: string;
+    dueDateISO: string | null;
+    amountCents: number;
+    remainingCents: number;
+  } | null;
   firstCovered?: boolean;
   lastCovered?: boolean;
-  receipts?: Array<{ id: string; kind: "upfront" | "deposit" | "rent" | "fee"; status: "processing" | "succeeded" | "failed" | "canceled" | "returned" | "created"; amountCents: number; createdAt: string; receiptUrl?: string | null; }>;
+  receipts?: Array<{
+    id: string;
+    kind: "upfront" | "deposit" | "rent" | "fee";
+    status: "processing" | "succeeded" | "failed" | "canceled" | "returned" | "created";
+    amountCents: number;
+    createdAt: string;
+    receiptUrl?: string | null;
+  }>;
+};
+
+// Off-session preflight payload from the API
+type OffSessionPrepared = {
+  paymentIntentId: string;
+  amountCents: number;
+  bucket: "upfront" | "deposit";
+  reason?: string;
+  accountLabel?: string | null;
 };
 
 /* ─────────────────────────────────────────────────────────────
-   Coverage (for explainer chip)
+   Coverage helpers
 ───────────────────────────────────────────────────────────── */
 function buildAllocMaps(alloc?: AllocationByCharge[]) {
-  const posted = new Map<string, number>(), pending = new Map<string, number>();
-  (alloc ?? []).forEach(a => { posted.set(a.chargeKey, Math.max(0, a.postedCents || 0)); pending.set(a.chargeKey, Math.max(0, a.pendingCents || 0)); });
+  const posted = new Map<string, number>(),
+    pending = new Map<string, number>();
+  (alloc ?? []).forEach((a) => {
+    posted.set(a.chargeKey, Math.max(0, a.postedCents || 0));
+    pending.set(a.chargeKey, Math.max(0, a.pendingCents || 0));
+  });
   return { posted, pending };
 }
-function remainingForCharge(c: Charge, posted: Map<string, number>, pending: Map<string, number>) {
+function remainingForCharge(
+  c: Charge,
+  posted: Map<string, number>,
+  pending: Map<string, number>,
+) {
   const paid = (posted.get(c.chargeKey) ?? 0) + (pending.get(c.chargeKey) ?? 0);
   const total = c.amountCents ?? 0;
   if (typeof c.remainingCents === "number") return Math.max(0, c.remainingCents);
   return Math.max(0, total - paid);
 }
-function computeCoverage(amountCents: number, charges?: Charge[], allocations?: AllocationByCharge[]) {
+function computeCoverage(
+  amountCents: number,
+  charges?: Charge[],
+  allocations?: AllocationByCharge[],
+) {
   const { posted, pending } = buildAllocMaps(allocations);
-  const lease = (charges ?? []).filter(c => c.bucket === "upfront");
+  const lease = (charges ?? []).filter((c) => c.bucket === "upfront");
   const rem = {
-    last: lease.filter(c => c.code === "last_month").reduce((s, c) => s + remainingForCharge(c, posted, pending), 0),
-    first: lease.filter(c => c.code === "first_month").reduce((s, c) => s + remainingForCharge(c, posted, pending), 0),
-    key: lease.filter(c => c.code === "key_fee").reduce((s, c) => s + remainingForCharge(c, posted, pending), 0),
+    last: lease
+      .filter((c) => c.code === "last_month")
+      .reduce((s, c) => s + remainingForCharge(c, posted, pending), 0),
+    first: lease
+      .filter((c) => c.code === "first_month")
+      .reduce((s, c) => s + remainingForCharge(c, posted, pending), 0),
+    key: lease
+      .filter((c) => c.code === "key_fee")
+      .reduce((s, c) => s + remainingForCharge(c, posted, pending), 0),
   };
   let amt = Math.max(0, amountCents || 0);
-  const pieces: { label: "Last month" | "First month" | "Key fee"; amountCents: number; fullyCovered: boolean }[] = [];
-  (["last","first","key"] as const).forEach(b => {
-    const need = rem[b]; if (need <= 0) return;
-    const take = Math.min(need, amt); if (take <= 0) return;
-    pieces.push({ label: b === "last" ? "Last month" : b === "first" ? "First month" : "Key fee", amountCents: take, fullyCovered: take === need });
+  const pieces: {
+    label: "Last month" | "First month" | "Key fee";
+    amountCents: number;
+    fullyCovered: boolean;
+  }[] = [];
+  (["last", "first", "key"] as const).forEach((b) => {
+    const need = rem[b];
+    if (need <= 0) return;
+    const take = Math.min(need, amt);
+    if (take <= 0) return;
+    pieces.push({
+      label: b === "last" ? "Last month" : b === "first" ? "First month" : "Key fee",
+      amountCents: take,
+      fullyCovered: take === need,
+    });
     amt -= take;
   });
   return { pieces, leftoverCents: amt };
@@ -129,7 +192,13 @@ function computeCoverage(amountCents: number, charges?: Charge[], allocations?: 
 /* ─────────────────────────────────────────────────────────────
    UI atoms
 ───────────────────────────────────────────────────────────── */
-function Badge({ children, tone = "gray" }: { children: React.ReactNode; tone?: "gray"|"emerald"|"rose"|"amber"|"blue" }) {
+function Badge({
+  children,
+  tone = "gray",
+}: {
+  children: React.ReactNode;
+  tone?: "gray" | "emerald" | "rose" | "amber" | "blue";
+}) {
   const map = {
     gray: "bg-gray-100 text-gray-800 ring-gray-200",
     emerald: "bg-emerald-50 text-emerald-800 ring-emerald-200",
@@ -137,9 +206,28 @@ function Badge({ children, tone = "gray" }: { children: React.ReactNode; tone?: 
     amber: "bg-amber-50 text-amber-900 ring-amber-200",
     blue: "bg-blue-50 text-blue-800 ring-blue-200",
   } as const;
-  return <span className={clsx("inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-medium ring-1 ring-inset", map[tone])}>{children}</span>;
+  return (
+    <span
+      className={clsx(
+        "inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-medium ring-1 ring-inset",
+        map[tone],
+      )}
+    >
+      {children}
+    </span>
+  );
 }
-function Card({ title, subtitle, children, as = "section" }: { title: string; subtitle?: string; children: React.ReactNode; as?: "section"|"div" }) {
+function Card({
+  title,
+  subtitle,
+  children,
+  as = "section",
+}: {
+  title: string;
+  subtitle?: string;
+  children: React.ReactNode;
+  as?: "section" | "div";
+}) {
   const Comp = as as any;
   return (
     <Comp className="rounded-xl border border-gray-200 bg-white p-5">
@@ -155,7 +243,13 @@ function Card({ title, subtitle, children, as = "section" }: { title: string; su
 /* ─────────────────────────────────────────────────────────────
    Stripe Elements subform
 ───────────────────────────────────────────────────────────── */
-function PaymentCheckoutForm({ returnUrl, onDone }: { returnUrl: string; onDone: () => void }) {
+function PaymentCheckoutForm({
+  returnUrl,
+  onDone,
+}: {
+  returnUrl: string;
+  onDone: () => void;
+}) {
   const stripe = useStripe();
   const elements = useElements();
   const [submitting, setSubmitting] = useState(false);
@@ -164,7 +258,8 @@ function PaymentCheckoutForm({ returnUrl, onDone }: { returnUrl: string; onDone:
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!stripe || !elements) return;
-    setSubmitting(true); setMsg(null);
+    setSubmitting(true);
+    setMsg(null);
 
     const { error, paymentIntent } = await stripe.confirmPayment({
       elements,
@@ -172,8 +267,15 @@ function PaymentCheckoutForm({ returnUrl, onDone }: { returnUrl: string; onDone:
       confirmParams: { return_url: returnUrl },
     });
 
-    if (error) { setMsg(error.message || "Payment failed, please try again."); setSubmitting(false); return; }
-    if (paymentIntent) { window.location.assign(returnUrl); return; }
+    if (error) {
+      setMsg(error.message || "Payment failed, please try again.");
+      setSubmitting(false);
+      return;
+    }
+    if (paymentIntent) {
+      window.location.assign(returnUrl);
+      return;
+    }
     setSubmitting(false);
   }
 
@@ -183,21 +285,34 @@ function PaymentCheckoutForm({ returnUrl, onDone }: { returnUrl: string; onDone:
       <div className="rounded-md border border-sky-200 bg-sky-50 p-3 text-xs text-sky-900">
         Pay securely from your bank account, ACH can take 2–5 business days.
       </div>
-      <p className="text-[11px] text-gray-500">By clicking <em>Pay now</em>, you authorize a one-time ACH debit.</p>
+      <p className="text-[11px] text-gray-500">
+        By clicking <em>Pay now</em>, you authorize a one-time ACH debit.
+      </p>
       <div className="flex items-center justify-end gap-2">
-        <button type="button" onClick={onDone} className="rounded-md border border-gray-300 bg-white px-3 py-2 text-xs font-medium hover:bg-gray-50">Cancel</button>
-        <button type="submit" disabled={!stripe || !elements || submitting} className="rounded-md bg-gray-900 px-3 py-2 text-xs font-medium text-white hover:bg-black disabled:opacity-60">
+        <button
+          type="button"
+          onClick={onDone}
+          className="rounded-md border border-gray-300 bg-white px-3 py-2 text-xs font-medium hover:bg-gray-50"
+        >
+          Cancel
+        </button>
+        <button
+          type="submit"
+          disabled={!stripe || !elements || submitting}
+          className="rounded-md bg-gray-900 px-3 py-2 text-xs font-medium text-white hover:bg-black disabled:opacity-60"
+        >
           {submitting ? "Processing…" : "Pay now"}
         </button>
       </div>
-      {msg && <div className="rounded-md border border-gray-200 bg-gray-50 p-3 text-sm text-gray-800">{msg}</div>}
+      {msg && (
+        <div className="rounded-md border border-gray-200 bg-gray-50 p-3 text-sm text-gray-800">
+          {msg}
+        </div>
+      )}
     </form>
   );
 }
 
-/* ─────────────────────────────────────────────────────────────
-   Component
-───────────────────────────────────────────────────────────── */
 /* ─────────────────────────────────────────────────────────────
    Component
 ───────────────────────────────────────────────────────────── */
@@ -218,6 +333,10 @@ export default function PaymentsDesktop({
 
   const [clientSecret, setClientSecret] = useState<string | null>(null);
   const [returnUrl, setReturnUrl] = useState<string | null>(null);
+
+  // NEW: off-session preflight state
+  const [offSession, setOffSession] = useState<OffSessionPrepared | null>(null);
+  const [confirmingOffSession, setConfirmingOffSession] = useState(false);
 
   const lastFetchedKeyRef = useRef<string | null>(null);
   const stripePromise = useMemo(() => getStripe(), []);
@@ -412,7 +531,7 @@ export default function PaymentsDesktop({
     depositRemaining,
   ]);
 
-  // Start payment
+  // Start payment (call session API)
   const startPayment = useCallback(
     async (kind: "upfront" | "deposit", amountCents: number, reasonLabel?: string) => {
       if (!appId || !`${appId}`.trim()) {
@@ -472,10 +591,36 @@ export default function PaymentsDesktop({
         }
 
         const j = await res.json().catch(() => ({} as any));
+
+        // 1) Off-session preflight case – show confirmation modal
+        if (j?.mode === "off_session_prepared" && j?.paymentIntentId) {
+          const accountLabel: string | null =
+            j?.summary?.accountLabel ??
+            j?.summary?.bankDisplay ??
+            null;
+
+          const amtFromServer =
+            typeof j?.summary?.amountCents === "number"
+              ? j.summary.amountCents
+              : amountCents;
+
+          setOffSession({
+            paymentIntentId: j.paymentIntentId as string,
+            amountCents: amtFromServer,
+            bucket: kind,
+            reason: reasonLabel ?? undefined,
+            accountLabel,
+          });
+          return;
+        }
+
+        // 2) Redirect URL (not used in your current flows, but kept for completeness)
         if (j?.url) {
           window.location.assign(j.url as string);
           return;
         }
+
+        // 3) Client-side Stripe Elements flow
         if (j?.clientSecret) {
           setClientSecret(j.clientSecret as string);
           setReturnUrl(
@@ -486,10 +631,13 @@ export default function PaymentsDesktop({
           );
           return;
         }
+
+        // 4) Plain ok – no further UI needed; just reload to reflect changes
         if (j?.ok) {
           window.location.reload();
           return;
         }
+
         setToast("Unexpected response,");
       } catch (e: any) {
         setToast(e?.message || "Couldn’t start payment,");
@@ -500,16 +648,155 @@ export default function PaymentsDesktop({
     [appId, firmId],
   );
 
-  /* ───────────────── Stripe Elements view ───────────────── */
+  // Confirm off-session payment (second step)
+  const handleConfirmOffSession = useCallback(async () => {
+    if (!offSession) return;
+    setConfirmingOffSession(true);
+    try {
+      const res = await fetch("/api/tenant/payments/confirm", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ paymentIntentId: offSession.paymentIntentId }),
+      });
+      const j = await res.json().catch(() => ({} as any));
+      if (!res.ok || !j?.ok) {
+        setToast(j?.error || "Couldn’t confirm payment,");
+        setConfirmingOffSession(false);
+        setOffSession(null);
+        return;
+      }
+
+      // Go to the same result view as Stripe Elements uses
+      window.location.assign(
+        `/tenant/payments/result?appId=${encodeURIComponent(
+          appId,
+        )}&key=${encodeURIComponent(offSession.paymentIntentId)}`,
+      );
+    } catch (e: any) {
+      setToast(e?.message || "Network error, please try again,");
+      setConfirmingOffSession(false);
+      setOffSession(null);
+    }
+  }, [offSession, appId]);
+
+  const handleCancelOffSession = useCallback(() => {
+    setOffSession(null);
+  }, []);
+
+  // If backend later supports "force client-side" version, you can wire this:
+  const handleUseDifferentAccount = useCallback(() => {
+    // For now, just close the modal; user can then pick another option or you
+    // can extend this to call a "force client-side" variant of the API.
+    setOffSession(null);
+    setToast("You can pick a different payment option or method below,");
+  }, []);
+
+  /* ───────────────── Off-session confirmation modal ───────────────── */
+const OffSessionModal = offSession ? (
+  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm px-4">
+    <div
+      className="w-full max-w-sm sm:max-w-md rounded-2xl bg-white p-5 sm:p-6 shadow-2xl ring-1 ring-black/5 border border-gray-100"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="offsession-title"
+    >
+      {/* Header row */}
+      <div className="flex items-start gap-3">
+        <div className="flex h-9 w-9 items-center justify-center rounded-full bg-emerald-50 ring-1 ring-emerald-100">
+          {/* lock icon */}
+          <svg
+            className="h-4 w-4 text-emerald-600"
+            viewBox="0 0 20 20"
+            fill="currentColor"
+            aria-hidden="true"
+          >
+            <path
+              fillRule="evenodd"
+              d="M10 2a4 4 0 00-4 4v2H5a2 2 0 00-2 2v6a2 2 0 002 2h10a2 2 0 002-2v-6a2 2 0 00-2-2h-1V6a4 4 0 00-4-4zm-2 6V6a2 2 0 114 0v2H8zm-1 2a1 1 0 00-1 1v5h8v-5a1 1 0 00-1-1H7z"
+              clipRule="evenodd"
+            />
+          </svg>
+        </div>
+        <div className="flex-1">
+          <h2
+            id="offsession-title"
+            className="text-base font-semibold text-gray-900"
+          >
+            Confirm your payment
+          </h2>
+          <p className="mt-1 text-sm text-gray-600">
+            You’re about to pay{" "}
+            <span className="font-semibold text-gray-900">
+              {money(offSession.amountCents)}
+            </span>{" "}
+            {offSession.bucket === "deposit"
+              ? "to your regulated security deposit account."
+              : "toward your charges."}
+          </p>
+        </div>
+      </div>
+
+      {/* Details block */}
+      <div className="mt-4 space-y-2 rounded-xl bg-gray-50/80 px-3 py-3 text-xs text-gray-700 border border-gray-100">
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-gray-600">Funding account</span>
+          <span className="font-medium text-gray-900 truncate">
+            {offSession.accountLabel || "Linked bank account,"}
+          </span>
+        </div>
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-gray-600">Processing time</span>
+          <span className="text-gray-900">
+            ACH, typically{" "}
+            <span className="font-medium">2–5 business days,</span>
+          </span>
+        </div>
+        <p className="pt-1 text-[11px] leading-snug text-gray-500">
+          Payments are processed securely by Stripe, once you confirm, your bank may
+          show this as a pending debit while it settles.
+        </p>
+      </div>
+
+      {/* Actions */}
+      <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+        <button
+          type="button"
+          onClick={handleCancelOffSession}
+          disabled={confirmingOffSession}
+          className="inline-flex justify-center rounded-md border border-gray-200 bg-white px-3.5 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          onClick={handleConfirmOffSession}
+          disabled={confirmingOffSession}
+          className="inline-flex justify-center rounded-md bg-gray-900 px-4 py-2 text-xs font-semibold text-white shadow-sm hover:bg-black disabled:opacity-60"
+        >
+          {confirmingOffSession ? "Confirming…" : "Confirm payment"}
+        </button>
+      </div>
+    </div>
+  </div>
+) : null;
+
+
+  /* ───────────────── Stripe Elements view (full login UI) ───────────────── */
   if (clientSecret && returnUrl) {
     return (
       <main className="min-h-[calc(100vh-4rem)] bg-[#e6edf1]">
+        {OffSessionModal}
         <div className="mx-auto max-w-2xl px-4 sm:px-6 py-6">
           <header className="rounded-3xl bg-gradient-to-r from-indigo-50 via-sky-50 to-rose-50 p-5 shadow-sm ring-1 ring-indigo-100/60">
-            <div className="text-xs font-semibold text-indigo-700">Step 3 · Payment</div>
-            <h1 className="mt-2 text-xl font-semibold text-gray-900">Complete payment</h1>
+            <div className="text-xs font-semibold text-indigo-700">
+              Step 3 · Payment
+            </div>
+            <h1 className="mt-2 text-xl font-semibold text-gray-900">
+              Complete payment
+            </h1>
             <p className="mt-1 text-sm text-gray-600">
-              Connect your bank account securely with Stripe, confirm the payment, and you’re done,
+              Connect your bank account securely with Stripe, confirm the payment, and you’re
+              done,
             </p>
           </header>
 
@@ -549,6 +836,7 @@ export default function PaymentsDesktop({
 
   return (
     <main className="min-h-[calc(100vh-4rem)] bg-[#e6edf1]">
+      {OffSessionModal}
       <div className="mx-auto max-w-6xl px-4 sm:px-6 py-6">
         {/* Hero-style status header */}
         <header className="rounded-3xl bg-gradient-to-r from-indigo-50 via-sky-50 to-rose-50 p-5 shadow-sm ring-1 ring-indigo-100/60">
@@ -583,14 +871,18 @@ export default function PaymentsDesktop({
               </div>
               <div>
                 Next 30 days {money(next30)}
-                {later > 0 && <span className="ml-1 text-gray-500">· Later {money(later)}</span>}
+                {later > 0 && (
+                  <span className="ml-1 text-gray-500">· Later {money(later)}</span>
+                )}
               </div>
             </div>
           </div>
 
           {/* Inline badges explaining countersign / deposit thresholds */}
           <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px]">
-            <Badge tone="blue">Application: {money(upfrontDue)} in up-fronts remaining</Badge>
+            <Badge tone="blue">
+              Application: {money(upfrontDue)} in up-fronts remaining
+            </Badge>
             {typeof countersignMin === "number" && countersignMin > 0 && (
               <Badge tone={countersignMet ? "emerald" : "amber"}>
                 {countersignMet
@@ -600,11 +892,7 @@ export default function PaymentsDesktop({
             )}
             {typeof chargesApi?.countersign?.depositMinThresholdCents === "number" &&
               chargesApi.countersign.depositMinThresholdCents! > 0 && (
-                <Badge
-                  tone={
-                    chargesApi?.countersign?.depositMet ? "emerald" : "amber"
-                  }
-                >
+                <Badge tone={chargesApi?.countersign?.depositMet ? "emerald" : "amber"}>
                   {chargesApi?.countersign?.depositMet
                     ? "Deposit minimum met"
                     : `Deposit minimum ${money(
@@ -612,9 +900,7 @@ export default function PaymentsDesktop({
                       )}`}
                 </Badge>
               )}
-            {w?.moveInDateISO && (
-              <Badge tone="gray">Move-in {w.moveInDateISO}</Badge>
-            )}
+            {w?.moveInDateISO && <Badge tone="gray">Move-in {w.moveInDateISO}</Badge>}
           </div>
         </header>
 
@@ -649,8 +935,8 @@ export default function PaymentsDesktop({
                       </span>
                     </div>
                     <p className="text-[11px] text-gray-600">
-                      Your deposit is kept separate from operating funds, and may earn
-                      interest depending on local rules,
+                      Your deposit is kept separate from operating funds, and may earn interest
+                      depending on local rules,
                     </p>
                   </div>
                   <button
@@ -671,10 +957,7 @@ export default function PaymentsDesktop({
             )}
 
             {/* Monthly rent summary */}
-            <Card
-              title="Monthly rent"
-              subtitle="What happens after move-in."
-            >
+            <Card title="Monthly rent" subtitle="What happens after move-in.">
               <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
                 <div className="space-y-1">
                   <div className="text-gray-700">
@@ -694,10 +977,9 @@ export default function PaymentsDesktop({
                     {chargesApi?.lastCovered && (
                       <Badge tone="emerald">Last month prepaid</Badge>
                     )}
-                    {!chargesApi?.firstCovered &&
-                      !chargesApi?.lastCovered && (
-                        <span>No months prepaid yet.</span>
-                      )}
+                    {!chargesApi?.firstCovered && !chargesApi?.lastCovered && (
+                      <span>No months prepaid yet.</span>
+                    )}
                   </div>
                 </div>
               </div>
@@ -713,8 +995,7 @@ export default function PaymentsDesktop({
                   {(chargesApi?.receipts ?? [])
                     .sort(
                       (a, b) =>
-                        new Date(b.createdAt).getTime() -
-                        new Date(a.createdAt).getTime(),
+                        new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
                     )
                     .slice(0, 12)
                     .map((r) => (
@@ -821,20 +1102,34 @@ function awaitedStripeOrNull(
 ───────────────────────────────────────────────────────────── */
 
 function UpfrontMini({
-  charges, allocations, nextRent,
+  charges,
+  allocations,
+  nextRent,
 }: {
   charges?: Charge[];
   allocations?: AllocationByCharge[];
-  nextRent?: { ym: string; dueDateISO: string | null; amountCents: number; remainingCents: number } | null | undefined;
+  nextRent?:
+    | { ym: string; dueDateISO: string | null; amountCents: number; remainingCents: number }
+    | null
+    | undefined;
 }) {
   const { posted, pending } = buildAllocMaps(allocations);
-  const lease = (charges ?? []).filter(c => c.bucket === "upfront");
-  const leaseRemaining = lease.reduce((s, c) => s + remainingForCharge(c, posted, pending), 0);
+  const lease = (charges ?? []).filter((c) => c.bucket === "upfront");
+  const leaseRemaining = lease.reduce(
+    (s, c) => s + remainingForCharge(c, posted, pending),
+    0,
+  );
 
   const rem = {
-    first: lease.filter(c => c.code === "first_month").reduce((s, c) => s + remainingForCharge(c, posted, pending), 0),
-    last:  lease.filter(c => c.code === "last_month").reduce((s, c) => s + remainingForCharge(c, posted, pending), 0),
-    key:   lease.filter(c => c.code === "key_fee").reduce((s, c) => s + remainingForCharge(c, posted, pending), 0),
+    first: lease
+      .filter((c) => c.code === "first_month")
+      .reduce((s, c) => s + remainingForCharge(c, posted, pending), 0),
+    last: lease
+      .filter((c) => c.code === "last_month")
+      .reduce((s, c) => s + remainingForCharge(c, posted, pending), 0),
+    key: lease
+      .filter((c) => c.code === "key_fee")
+      .reduce((s, c) => s + remainingForCharge(c, posted, pending), 0),
   };
 
   return (
@@ -849,7 +1144,11 @@ function UpfrontMini({
         <MiniRow label="Key fee" remaining={rem.key} />
       </div>
       <div className="rounded-md border border-gray-200 p-3 text-[11px] text-gray-700">
-        Payments apply in this order: <b>Last → First → Key</b>, extra rolls into monthly rent{nextRent?.remainingCents ? `, next due ${nextRent.ym} (${money(nextRent.remainingCents)} remaining)` : ","} simple.
+        Payments apply in this order: <b>Last → First → Key</b>, extra rolls into monthly rent
+        {nextRent?.remainingCents
+          ? `, next due ${nextRent.ym} (${money(nextRent.remainingCents)} remaining)`
+          : ","}{" "}
+        simple.
       </div>
     </div>
   );
@@ -984,7 +1283,7 @@ function SmartPayPanel({
               ))}
               {cov.leftoverCents > 0 && (
                 <li>
-                  Any extra&nbsp;
+                  Any extra{" "}
                   <span className="font-medium">
                     {money(cov.leftoverCents)}
                   </span>{" "}
@@ -1023,4 +1322,3 @@ function SmartPayPanel({
     </div>
   );
 }
-

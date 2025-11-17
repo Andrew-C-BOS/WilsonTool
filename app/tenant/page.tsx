@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { getSessionUser } from "@/lib/auth";
 import TenantRouter from "./TenantRouter";
 import { buildTenantHomeState } from "@/lib/tenant/homeViewState";
+import TenantStripeBootstrapper from "./TenantStripeBootstrapper";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -14,7 +15,7 @@ export default async function Page() {
 
   // If not logged in or not a tenant, kick them out
   if (!user || user.role !== "tenant") {
-    redirect("/login"); // or "/" or wherever you want
+    redirect("/login");
   }
 
   const state = await buildTenantHomeState({
@@ -23,11 +24,16 @@ export default async function Page() {
   });
 
   return (
-    <Suspense fallback={<div>Loading…</div>}>
-      <TenantRouter
-        user={{ email: user.email }}
-        state={state}
-      />
-    </Suspense>
+    <>
+      {/* runs on the client, quietly ensuring Stripe customer exists */}
+      <TenantStripeBootstrapper />
+
+      <Suspense fallback={<div>Loading…</div>}>
+        <TenantRouter
+          user={{ email: user.email }}
+          state={state}
+        />
+      </Suspense>
+    </>
   );
 }
