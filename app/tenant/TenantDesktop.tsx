@@ -305,7 +305,7 @@ export default function TenantDesktop({
           </section>
 
           {/* Supplementary info / Contact */}
-          <section className="mt-10 grid gap-6 rounded-2xl bg-white/95 p-6 shadow-sm ring-1 ring-slate-100 sm:grid-cols-2">
+			  {/* <section className="mt-10 grid gap-6 rounded-2xl bg-white/95 p-6 shadow-sm ring-1 ring-slate-100 sm:grid-cols-2">
             <div>
               <h3 className="mb-3 flex items-center text-base font-semibold text-slate-900">
                 <Calendar className="mr-2 h-5 w-5 text-indigo-500" />
@@ -359,10 +359,10 @@ export default function TenantDesktop({
                 </p>
               </div>
             </div>
-          </section>
+			  </section> */}
 
           {/* Tertiary nav */}
-          <section className="mt-8">
+			  {/*<section className="mt-8">
             <div className="grid gap-3 sm:grid-cols-3">
               {secondary.map((s) => (
                 <Link
@@ -374,7 +374,7 @@ export default function TenantDesktop({
                 </Link>
               ))}
             </div>
-          </section>
+			  </section>*/}
         </div>
       </div>
     </main>
