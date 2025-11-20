@@ -211,6 +211,9 @@ export default function LeaseOverviewDesktop({ leaseId, firmId }: { leaseId: str
   const [inspLoading, setInspLoading] = useState(false);
   const [inspErr, setInspErr] = useState<string | null>(null);
 
+  // NEW: toggle for Statement of Condition iframe
+  const [showCondition, setShowCondition] = useState(false);
+
   useEffect(() => {
     let cancel = false;
     (async () => {
@@ -325,6 +328,16 @@ export default function LeaseOverviewDesktop({ leaseId, firmId }: { leaseId: str
     if (insp.status === "draft") return "Continue inspection";
     return "View inspection";
   })();
+
+  // URL for the Statement of Condition receipt, with firmId passthrough
+  const statementUrl = useMemo(
+    () =>
+      withFirmId(
+        `/api/receipts/statement-of-condition/${encodeURIComponent(leaseId)}`,
+        firmId,
+      ),
+    [leaseId, firmId],
+  );
 
   return (
     <main className="mx-auto w-full max-w-5xl px-6 pb-10">
@@ -456,9 +469,46 @@ export default function LeaseOverviewDesktop({ leaseId, firmId }: { leaseId: str
             >
               {inspButtonLabel}
             </Link>
+
+            {/* NEW: button to toggle Statement of Condition iframe, only when submitted */}
+            {insp?.status === "submitted" && (
+              <button
+                type="button"
+                onClick={() => setShowCondition((v) => !v)}
+                className={clsx(
+                  "inline-flex items-center rounded-md px-3 py-1.5 text-[11px] font-semibold ring-1",
+                  showCondition
+                    ? "bg-emerald-600 text-white ring-emerald-600 hover:bg-emerald-500"
+                    : "bg-white text-emerald-700 ring-emerald-200 hover:bg-emerald-50",
+                )}
+              >
+                {showCondition ? "Hide Statement of Condition" : "View Statement of Condition"}
+              </button>
+            )}
           </div>
         </div>
       </section>
+
+      {/* NEW: Statement of Condition iframe */}
+      {showCondition && (
+        <section className="mb-6">
+          <div className="mb-2 text-sm font-semibold text-gray-900">
+            Statement of Condition (Massachusetts)
+          </div>
+          <div className="overflow-hidden rounded-lg border border-gray-200 bg-white">
+            <iframe
+              src={statementUrl}
+              className="h-[600px] w-full"
+              loading="lazy"
+              sandbox="allow-same-origin allow-scripts allow-forms"
+            />
+          </div>
+          <p className="mt-1 text-[11px] text-gray-500">
+            This preview loads the Massachusetts Statement of Condition generated from the completed
+            pre-move-in inspection for this lease,
+          </p>
+        </section>
+      )}
 
       {/* Checklist */}
       <section>

@@ -1,7 +1,9 @@
-// app/api/disclosures/statement-of-condition/[inspectionId]/route.ts
+// app/api/receipts/statement-of-condition/[leaseId]/route.ts
 import { NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
-import { ObjectId } from "mongodb";
+import { s3, S3_BUCKET, S3_PUBLIC_BASE_URL } from "@/lib/aws/s3";
+import { GetObjectCommand } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -23,14 +25,13 @@ function htmlShell(
   opts?: { emailMode?: boolean },
 ) {
   const { emailMode = false } = opts || {};
-  // Styling is intentionally very close to the security‑deposit receipt route
   return `<!doctype html><html lang="en"><head>
 <meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>${esc(title)}</title>
 <style>
  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,sans-serif;background:#f7f7f7;margin:0}
  .page{max-width:900px;margin:24px auto;background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:24px}
- h1{font-size:20px;font-weight:700;margin:0}
+ h1{font-size:20px;font-weight:700;margin:12px 0 0}
  h2{font-size:16px;font-weight:600;margin:18px 0 8px}
  hr{border:0;border-top:1px solid #e5e7eb;margin:16px 0}
  .muted{color:#475569;font-size:12px}
@@ -38,13 +39,25 @@ function htmlShell(
  @media(max-width:760px){.grid{grid-template-columns:1fr}}
  .row{font-size:14px}
  .label{color:#64748b;display:block;font-size:12px}
- .box{border:1px solid #e5e7eb;border-radius:8px;padding:12px;background:#fff}
- .sigline{border-top:1px solid #cbd5e1;height:28px;margin-top:24px}
+ .box{border:1px solid #e5e7eb;border-radius:12px;padding:12px;background:#fff}
+ .sigline{border-top:1px solid #cbd5e1;height:28px;margin-top:8px}
  .note{background:#f1f5f9;border:1px dashed #cbd5e1;border-radius:8px;padding:10px;color:#334155;font-size:12px}
  ul.damage-list{margin:8px 0 16px 18px;padding:0;font-size:14px}
- ul.damage-list li{margin-bottom:4px}
+ ul.damage-list li{margin-bottom:8px}
  .room-header{margin-top:18px;font-weight:600;font-size:14px}
  .tag{display:inline-block;border-radius:999px;border:1px solid #cbd5e1;padding:0 6px;font-size:11px;color:#475569;margin-left:4px}
+ #ma-statement-notice{
+   font-weight:700;
+   font-size:12pt;
+   margin:0 0 12px 0;
+ }
+ .photo-grid{display:flex;flex-wrap:wrap;gap:8px;margin-top:4px}
+ .photo-thumb{max-width:140px;max-height:140px;border-radius:6px;border:1px solid #e5e7eb;object-fit:cover}
+ .photo-caption{font-size:11px;color:#6b7280;margin-top:2px}
+ .page-break{page-break-before:always;margin-top:24px}
+ .appendix-title{font-size:16px;font-weight:600;margin:0 0 4px}
+ .appendix-item{margin-top:12px}
+ .appendix-meta{font-size:12px;color:#4b5563;margin-bottom:4px}
 </style>
 </head><body><div class="page">${inner}</div></body></html>`;
 }
@@ -92,9 +105,14 @@ function formatSeverity(severity: any): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
-// This is a *paraphrased* default notice that tracks the substance of
-// M.G.L. c.186 § 15B(2)(c). For strict legal compliance, override with the
-// exact statutory language (for example via MA_STATEMENT_OF_CONDITION_NOTICE).
+/**
+ * This is a *paraphrased* fallback notice with the same substance as
+ * M.G.L. c.186 § 15B(2)(c), but it is NOT the exact statutory text.
+ *
+ * For strict compliance, always override this by setting the environment
+ * variable MA_STATEMENT_OF_CONDITION_NOTICE to the full, exact notice
+ * from the statute (copied from the official Massachusetts site).
+ */
 const DEFAULT_MA_STATEMENT_NOTICE =
   "This is a written statement of the present condition of the premises you are renting. " +
   "You should read it carefully. If you agree that it is complete and accurate, sign and return it. " +
@@ -102,10 +120,58 @@ const DEFAULT_MA_STATEMENT_NOTICE =
   "Under Massachusetts law, you must return the statement within fifteen (15) days after you receive it or after you move in, whichever is later. " +
   "If you do not return anything within that time, a court may later treat that as your agreement that this list is complete and correct in any case about your security deposit.";
 
+/* ---------- S3 signing helpers ---------- */
+
+async function signS3Url(raw: string): Promise<string> {
+  if (!raw) return raw;
+
+  // If it already looks like a presigned URL, leave it alone.
+  try {
+    const u = new URL(raw);
+    if (u.searchParams.has("X-Amz-Signature") || u.searchParams.has("X-Amz-Credential")) {
+      return raw;
+    }
+
+    // If it's our bucket's public base URL, strip prefix and sign that key.
+    if (raw.startsWith(S3_PUBLIC_BASE_URL)) {
+      const rawPath = raw.slice(S3_PUBLIC_BASE_URL.length).replace(/^\/+/, "");
+      const key = decodeURIComponent(rawPath);
+      const cmd = new GetObjectCommand({ Bucket: S3_BUCKET, Key: key });
+      return await getSignedUrl(s3, cmd, { expiresIn: 60 * 60 }); // 1 hour
+    }
+
+    // Not our bucket host – safest is to just return raw (don't try to sign third-party URLs)
+    return raw;
+  } catch {
+    // If it's not a valid URL, maybe it's just an object key.
+    const keyCandidate = raw.replace(/^s3:\/\//, "").replace(/^\/+/, "");
+    if (!keyCandidate) return raw;
+    const cmd = new GetObjectCommand({ Bucket: S3_BUCKET, Key: keyCandidate });
+    return await getSignedUrl(s3, cmd, { expiresIn: 60 * 60 });
+  }
+}
+
+async function signInspectionPhotos(inspection: any): Promise<any> {
+  const items = Array.isArray(inspection.items) ? inspection.items : [];
+  const signedItems = await Promise.all(
+    items.map(async (item: any) => {
+      const photos: string[] = Array.isArray(item.photos) ? item.photos : [];
+      const signedPhotos = await Promise.all(
+        photos.map((p) => signS3Url(String(p))),
+      );
+      return { ...item, photos: signedPhotos };
+    }),
+  );
+  return { ...inspection, items: signedItems };
+}
+
+/* ---------- HTML builders ---------- */
+
+/** Main section listing condition + inline thumbnails */
 function buildConditionHtml(grouped: Record<string, any[]>): string {
   const rooms = Object.keys(grouped);
   if (!rooms.length) {
-    return "<p class=\"muted\">No pre-existing damage was recorded in this landlord inspection.</p>";
+    return '<p class="muted">No pre-existing damage was recorded in this landlord inspection.</p>';
   }
 
   let html = "";
@@ -125,26 +191,77 @@ function buildConditionHtml(grouped: Record<string, any[]>): string {
       const severityTag = severityLabel
         ? `<span class="tag">${esc(severityLabel)}</span>`
         : "";
+
+      const mainText = parts.join(" – ");
+
       let photosHtml = "";
       if (Array.isArray(item.photos) && item.photos.length) {
-        const links = item.photos
+        const imgs = item.photos
           .filter(Boolean)
           .map(
             (url: string, idx: number) =>
-              `<a href="${esc(
-                url,
-              )}" target="_blank" rel="noreferrer">photo ${idx + 1}</a>`,
+              `<div>
+                 <img src="${esc(url)}" alt="Photo ${idx + 1} – ${esc(
+                   item.description || room,
+                 )}" class="photo-thumb" loading="lazy" />
+               </div>`,
           )
-          .join(", ");
-        photosHtml = links
-          ? `<div class="muted">Photos: ${links}</div>`
-          : "";
+          .join("");
+        photosHtml = `<div class="photo-grid">${imgs}</div>`;
       }
-      const mainText = parts.join(" – ");
+
       html += `<li>${mainText}${severityTag}${photosHtml}</li>`;
     }
     html += "</ul>";
   }
+  return html;
+}
+
+/** Photo appendix for print/PDF: larger gallery grouped by item */
+function buildPhotoAppendix(items: any[] | undefined | null): string {
+  const photoItems = (items || []).filter(
+    (it) => Array.isArray(it.photos) && it.photos.length,
+  );
+  if (!photoItems.length) return "";
+
+  let html = `
+<div class="page-break"></div>
+<h2 class="appendix-title">Photo Appendix – Statement of Condition</h2>
+<p class="muted">
+  The photos below were captured as part of the pre-move-in inspection and correspond to the items listed in the Statement of Condition above.
+</p>
+`;
+
+  for (const item of photoItems) {
+    const room = String(item.room || "Unspecified area");
+    const severity = formatSeverity(item.severity);
+    html += `<div class="appendix-item">
+      <div class="appendix-meta">
+        <strong>${esc(room)}</strong>${
+          item.category ? ` • ${esc(String(item.category))}` : ""
+        }${
+      item.description ? ` • ${esc(String(item.description))}` : ""
+    }${severity ? ` • Severity: ${esc(severity)}` : ""}
+      </div>
+      <div class="photo-grid">
+    `;
+
+    html += item.photos
+      .filter(Boolean)
+      .map(
+        (url: string, idx: number) =>
+          `<div>
+             <img src="${esc(url)}" alt="Photo ${idx + 1} – ${esc(
+               item.description || room,
+             )}" class="photo-thumb" loading="lazy" />
+             <div class="photo-caption">Photo ${idx + 1}</div>
+           </div>`,
+      )
+      .join("");
+
+    html += `</div></div>`;
+  }
+
   return html;
 }
 
@@ -158,43 +275,31 @@ export async function GET(req: Request, ctx: any) {
     (url.searchParams.get("mode") || "").toLowerCase() === "email";
 
   const params = await resolveParams(ctx);
-  const seg = params?.inspectionId ?? "";
-  const q = url.searchParams.get("inspectionId") || "";
+  const seg = params?.leaseId ?? "";
+  const q = url.searchParams.get("leaseId") || "";
   const pathSegs = url.pathname.split("/").filter(Boolean);
   const last = pathSegs[pathSegs.length - 1];
-  const inspectionIdRaw = seg || q || last || "";
+  const leaseIdRaw = seg || q || last || "";
 
   const trace: { [k: string]: any } = {
-    params: { inspectionIdRaw, seg, q, last },
+    params: { leaseIdRaw, seg, q, last },
     lookup: {},
   };
 
   const inspectionsCol = db.collection("landlord_inspections") as any;
 
   let inspection: any = null;
-  if (inspectionIdRaw) {
-    // Try _id as ObjectId
-    if (ObjectId.isValid(inspectionIdRaw)) {
-      inspection = await inspectionsCol.findOne({
-        _id: new ObjectId(inspectionIdRaw),
-      });
-      trace.lookup.byObjectId = !!inspection;
-    }
-    // Try _id as string
-    if (!inspection) {
-      inspection = await inspectionsCol.findOne({ _id: inspectionIdRaw });
-      trace.lookup.byStringId = !!inspection;
-    }
-    // Optional: also allow lookup by leaseId
-    if (!inspection) {
-      inspection = await inspectionsCol.findOne({ leaseId: inspectionIdRaw });
-      trace.lookup.byLeaseId = !!inspection;
-    }
+
+  if (leaseIdRaw) {
+    // Basic assumption: one inspection per lease; if you end up with multiple,
+    // you may want to add an explicit sort by createdAt/updatedAt.
+    inspection = await inspectionsCol.findOne({ leaseId: leaseIdRaw });
+    trace.lookup.byLeaseId = !!inspection;
   }
 
   if (!inspection) {
     const notFound = htmlShell(
-      "<h1>Statement of Condition</h1><p class='muted'>Inspection not found.</p>",
+      "<h1>Statement of Condition</h1><p class='muted'>No inspection found for this lease.</p>",
       "Statement of Condition",
       { emailMode },
     );
@@ -210,8 +315,12 @@ export async function GET(req: Request, ctx: any) {
     });
   }
 
+  // 🔐 Sign all photo URLs before building HTML
+  inspection = await signInspectionPhotos(inspection);
+
   const grouped = groupInspectionItemsByRoom(inspection.items);
   const conditionHtml = buildConditionHtml(grouped);
+  const appendixHtml = buildPhotoAppendix(inspection.items);
 
   const statementDateISO =
     toISO(inspection.createdAt) || toISO(inspection.updatedAt);
@@ -235,15 +344,44 @@ export async function GET(req: Request, ctx: any) {
     (inspection.inspectorId && String(inspection.inspectorId)) || "—";
   const statusRef = (inspection.status && String(inspection.status)) || "—";
 
+  // Optional: pull basic lease details (address, tenant names) if available
+  let leaseAddress = "";
+  let tenantNames = "";
+  try {
+    const leasesCol = db.collection("leases") as any;
+    const leaseDoc = await leasesCol.findOne({ _id: leaseRef });
+    if (leaseDoc) {
+      leaseAddress =
+        leaseDoc.premisesAddress ||
+        leaseDoc.address ||
+        leaseDoc.unitAddress ||
+        "";
+      if (Array.isArray(leaseDoc.tenants) && leaseDoc.tenants.length) {
+        tenantNames = leaseDoc.tenants
+          .map((t: any) => t.name || t.fullName)
+          .filter(Boolean)
+          .join(", ");
+      } else if (leaseDoc.tenantName) {
+        tenantNames = leaseDoc.tenantName;
+      }
+      trace.leaseDocFound = true;
+    }
+  } catch {
+    // Non-fatal; just omit address/tenants if lookup fails
+  }
+
   const inner = `
+<p id="ma-statement-notice">${esc(statutoryNotice)}</p>
+
 <h1>Statement of Condition – Massachusetts Security Deposit</h1>
 <p class="muted">
   Prepared on ${esc(statementDateDisplay)} for lease ${esc(
     leaseRef,
-  )}. This document is intended to satisfy the
-  Massachusetts “statement of present condition” requirement when a security deposit is taken.
+  )}. This separate written statement describes the present condition of the premises at the start of the tenancy.
 </p>
+
 <hr/>
+
 <div class="grid">
   <div class="box">
     <div class="row"><span class="label">Lease Reference</span>${esc(
@@ -263,16 +401,38 @@ export async function GET(req: Request, ctx: any) {
   </div>
 </div>
 
-<h2>Important notice to tenant</h2>
-<p class="muted" style="white-space:pre-line">${esc(statutoryNotice)}</p>
+<div class="grid" style="margin-top:12px">
+  <div class="box">
+    <div class="row"><span class="label">Premises Address</span>${
+      leaseAddress ? esc(leaseAddress) : "____________________________"
+    }</div>
+  </div>
+  <div class="box">
+    <div class="row"><span class="label">Tenant(s)</span>${
+      tenantNames ? esc(tenantNames) : "____________________________"
+    }</div>
+  </div>
+</div>
 
 <h2>Present condition of the premises</h2>
 ${conditionHtml}
 
 <div style="margin-top:32px" class="grid">
   <div class="box">
-    <div class="row"><span class="label">Landlord / Agent Signature</span><div class="sigline"></div></div>
-    <div class="row"><span class="label">Date</span><div class="sigline"></div></div>
+    <div class="row">
+      <span class="label">Landlord / Agent Certification</span>
+      <div class="muted" style="font-size:11px;margin-top:4px;">
+        I certify under pains and penalties of perjury that this Statement of Condition is, to the best of my knowledge, true, accurate, and complete as of the date signed.
+      </div>
+    </div>
+    <div class="row" style="margin-top:12px;">
+      <span class="label">Landlord / Agent Signature</span>
+      <div class="sigline"></div>
+    </div>
+    <div class="row">
+      <span class="label">Date</span>
+      <div class="sigline"></div>
+    </div>
   </div>
   <div class="box">
     <div class="row"><span class="label">Tenant Signature(s)</span><div class="sigline"></div></div>
@@ -283,13 +443,15 @@ ${conditionHtml}
 <p class="note" style="margin-top:18px">
   Tenant: if you believe this statement is incomplete or inaccurate, you may attach your own signed list of additional damage or defects that you believe exist, and return both this form and your list to the landlord within fifteen (15) days after you receive this statement or move in, whichever is later.
 </p>
+
+${appendixHtml}
 `;
 
   const html = htmlShell(inner, "Statement of Condition", { emailMode });
 
   if (debugLevel >= 1) {
     return NextResponse.json({
-      inspectionIdRaw,
+      leaseIdRaw,
       inspection,
       grouped,
       html,
@@ -300,6 +462,9 @@ ${conditionHtml}
   return new NextResponse(html, {
     headers: {
       "Content-Type": "text/html; charset=utf-8",
+      "Content-Disposition": `inline; filename="statement-of-condition-${encodeURIComponent(
+        leaseRef,
+      )}.html"`,
       "X-Frame-Options": "SAMEORIGIN",
       "Content-Security-Policy":
         "default-src 'none'; img-src data: https:; style-src 'unsafe-inline'; frame-ancestors 'self'; base-uri 'none'; form-action 'none';",
