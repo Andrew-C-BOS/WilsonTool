@@ -166,6 +166,11 @@ export default function LeaseDesktop({
   onLeaseUpdated: (next: LeaseDoc) => void;
 }) {
   const [toast, setToast] = useState<string | null>(null);
+  
+  const [inspectionOpen, setInspectionOpen] = useState(false);
+  const [inspectionAvailable, setInspectionAvailable] = useState<
+    boolean | null
+  >(null);
 
   // app/firm IDs for payments — prefer lease fields, else lift from /api/tenant/lease
   const [resolvedAppId, setResolvedAppId] = useState<string | null>(() => {
@@ -232,6 +237,41 @@ export default function LeaseDesktop({
       abort = true;
     };
   }, [lease]);
+  
+  useEffect(() => {
+    if (!leaseId) return;
+
+    let abort = false;
+
+    (async () => {
+      try {
+        // Use debug=1 so the route returns JSON we can safely ignore,
+        // we only care whether it exists (2xx) or not (404),
+        const res = await fetch(
+          `/api/receipts/statement-of-condition/${encodeURIComponent(
+            leaseId,
+          )}?debug=1`,
+          { cache: "no-store" },
+        );
+
+        if (abort) return;
+
+        if (res.ok) {
+          setInspectionAvailable(true);
+        } else if (res.status === 404) {
+          setInspectionAvailable(false);
+        } else {
+          setInspectionAvailable(false);
+        }
+      } catch {
+        if (!abort) setInspectionAvailable(false);
+      }
+    })();
+
+    return () => {
+      abort = true;
+    };
+  }, [leaseId]);
 
   function flash(msg: string) {
     setToast(msg);
@@ -656,12 +696,43 @@ export default function LeaseDesktop({
                   )}
                 </div>
               </Card>
+			  
+			  
 
               {/* Files / Documents */}
               <Card
                 title="Lease documents"
                 subtitle="View your lease, disclosures, and other files shared with you,"
               >
+                {/* Landlord inspection / Statement of Condition */}
+                {inspectionAvailable && leaseId && (
+                  <div className="mb-3 flex flex-col gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="max-w-md">
+                      The landlord’s pre–move in inspection and Statement of
+                      Condition are available for this lease,
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setInspectionOpen(true)}
+                        className="inline-flex items-center justify-center rounded-md bg-slate-900 px-3 py-1.5 text-[11px] font-semibold text-white shadow-sm hover:bg-slate-800"
+                      >
+                        View inspection here
+                      </button>
+                      <a
+                        href={`/api/receipts/statement-of-condition/${encodeURIComponent(
+                          leaseId,
+                        )}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center justify-center rounded-md border border-slate-300 bg-white px-3 py-1.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-50"
+                      >
+                        Open in new tab
+                      </a>
+                    </div>
+                  </div>
+                )}
+
                 {landlordDocs.length === 0 && paymentFiles.length === 0 ? (
                   <Empty hint="No documents shared yet," />
                 ) : (
@@ -955,6 +1026,13 @@ export default function LeaseDesktop({
               bankReceiptDueISO={disc?.bankReceiptDueISO ?? null}
             />
           )}
+		  
+		 {inspectionOpen && leaseId && (
+            <InspectionModal
+              leaseId={leaseId}
+              onClose={() => setInspectionOpen(false)}
+            />
+          )}
         </div>
       </div>
     </main>
@@ -1041,6 +1119,61 @@ function Toast({ text, onClose }: { text: string; onClose: () => void }) {
         >
           Close
         </button>
+      </div>
+    </div>
+  );
+}
+
+function InspectionModal({
+  leaseId,
+  onClose,
+}: {
+  leaseId: string;
+  onClose: () => void;
+}) {
+  const src = `/api/receipts/statement-of-condition/${encodeURIComponent(
+    leaseId,
+  )}`;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 px-3 py-6 sm:px-6">
+      <div className="flex max-h-full w-full max-w-5xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+        <header className="flex items-center justify-between border-b border-slate-200 px-4 py-2.5 sm:px-5">
+          <div className="min-w-0">
+            <h2 className="truncate text-sm font-semibold text-slate-900">
+              Move in inspection and Statement of Condition
+            </h2>
+            <p className="mt-0.5 text-[11px] text-slate-500">
+              This view is for your records only, your lease and any signed
+              addenda always control,
+            </p>
+          </div>
+          <div className="ml-3 flex items-center gap-2">
+            <a
+              href={src}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-[11px] font-medium text-slate-700 hover:bg-slate-50"
+            >
+              Open in new tab
+            </a>
+            <button
+              type="button"
+              onClick={onClose}
+              className="inline-flex items-center justify-center rounded-md bg-slate-900 px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-slate-800"
+            >
+              Close
+            </button>
+          </div>
+        </header>
+
+        <div className="flex-1 overflow-hidden bg-slate-50">
+          <iframe
+            src={src}
+            title="Statement of Condition"
+            className="h-[70vh] w-full border-0 bg-white"
+          />
+        </div>
       </div>
     </div>
   );
