@@ -4,6 +4,7 @@ import { getDb } from "@/lib/db";
 import { s3, S3_BUCKET, S3_PUBLIC_BASE_URL } from "@/lib/aws/s3";
 import { GetObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { ObjectId } from "mongodb";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -68,6 +69,24 @@ function toISO(v: any): string | null {
   return isNaN(d.getTime()) ? null : d.toISOString();
 }
 
+/** Simple cents → $X,XXX.XX formatter */
+function moneyFromCents(c: any): string {
+  const n = Number(c);
+  if (!isFinite(n)) return "";
+  return `$${(n / 100).toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
+/** Safe ObjectId conversion for string or ObjectId-ish values */
+function toMaybeObjectId(v: any): ObjectId | null {
+  if (!v) return null;
+  if (v instanceof ObjectId) return v;
+  const s = String(v);
+  return ObjectId.isValid(s) ? new ObjectId(s) : null;
+}
+
 /** In Next 15+, ctx.params may be a Promise. */
 async function resolveParams(ctx: any): Promise<Record<string, string> | null> {
   if (!ctx || !("params" in ctx)) return null;
@@ -114,11 +133,11 @@ function formatSeverity(severity: any): string {
  * from the statute (copied from the official Massachusetts site).
  */
 const DEFAULT_MA_STATEMENT_NOTICE =
-  "This is a written statement of the present condition of the premises you are renting. " +
-  "You should read it carefully. If you agree that it is complete and accurate, sign and return it. " +
-  "If you disagree, you may attach your own signed list of additional damage or defects that you believe exist and return that as well. " +
-  "Under Massachusetts law, you must return the statement within fifteen (15) days after you receive it or after you move in, whichever is later. " +
-  "If you do not return anything within that time, a court may later treat that as your agreement that this list is complete and correct in any case about your security deposit.";
+  "This is a written statement of the present condition of the premises you are renting, " +
+  "You should read it carefully, If you agree that it is complete and accurate, sign and return it, " +
+  "If you disagree, you may attach your own signed list of additional damage or defects that you believe exist and return that as well, " +
+  "Under Massachusetts law, you must return the statement within fifteen (15) days after you receive it or after you move in, whichever is later, " +
+  "If you do not return anything within that time, a court may later treat that as your agreement that this list is complete and correct in any case about your security deposit,";
 
 /* ---------- S3 signing helpers ---------- */
 
@@ -322,6 +341,7 @@ export async function GET(req: Request, ctx: any) {
   const conditionHtml = buildConditionHtml(grouped);
   const appendixHtml = buildPhotoAppendix(inspection.items);
 
+  // Base statement date: when the inspection record was created / last touched
   const statementDateISO =
     toISO(inspection.createdAt) || toISO(inspection.updatedAt);
   const statementDateDisplay = statementDateISO
@@ -332,43 +352,203 @@ export async function GET(req: Request, ctx: any) {
       })
     : new Date().toLocaleDateString();
 
+  // Landlord "signature" date = when the inspection was submitted (fall back to updatedAt/createdAt)
+  const submissionDateISO =
+    toISO((inspection as any).submittedAt) ||
+    toISO(inspection.updatedAt) ||
+    toISO(inspection.createdAt) ||
+    statementDateISO;
+  const landlordSignatureDateDisplay = submissionDateISO
+    ? new Date(submissionDateISO).toLocaleDateString(undefined, {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+      })
+    : statementDateDisplay;
+
   const statutoryNotice =
     (process.env.MA_STATEMENT_OF_CONDITION_NOTICE || "").trim() ||
     DEFAULT_MA_STATEMENT_NOTICE;
 
   const leaseRef =
     (inspection.leaseId && String(inspection.leaseId)) || "—";
-  const landlordRef =
-    (inspection.firmId && String(inspection.firmId)) || "—";
+  const firmId =
+    (inspection.firmId && String(inspection.firmId)) || "";
+  const landlordRef = firmId || "—";
   const inspectorRef =
     (inspection.inspectorId && String(inspection.inspectorId)) || "—";
   const statusRef = (inspection.status && String(inspection.status)) || "—";
 
-  // Optional: pull basic lease details (address, tenant names) if available
+  // Pull unit / building details from unit_leases
   let leaseAddress = "";
-  let tenantNames = "";
+  let moveInDisplay = "";
+  let moveOutDisplay = "";
+  let monthlyRentDisplay = "";
+  let leaseHouseholdId: string | null = null;
+
   try {
-    const leasesCol = db.collection("leases") as any;
-    const leaseDoc = await leasesCol.findOne({ _id: leaseRef });
-    if (leaseDoc) {
-      leaseAddress =
-        leaseDoc.premisesAddress ||
-        leaseDoc.address ||
-        leaseDoc.unitAddress ||
-        "";
-      if (Array.isArray(leaseDoc.tenants) && leaseDoc.tenants.length) {
-        tenantNames = leaseDoc.tenants
-          .map((t: any) => t.name || t.fullName)
+    if (leaseRef && leaseRef !== "—") {
+      const unitLeasesCol = db.collection("unit_leases") as any;
+      const leaseDoc = await unitLeasesCol.findOne({ _id: leaseRef });
+      if (leaseDoc) {
+        trace.unitLeaseDocFound = true;
+
+        leaseHouseholdId = leaseDoc.householdId || null;
+
+        // Address
+        const b = leaseDoc.building || {};
+        const line = [b.addressLine1, b.addressLine2].filter(Boolean).join(", ");
+        const cityStateZip = [b.city, b.state, b.postalCode]
           .filter(Boolean)
           .join(", ");
-      } else if (leaseDoc.tenantName) {
-        tenantNames = leaseDoc.tenantName;
+        const country = b.country;
+        const addrParts = [line, cityStateZip, country].filter(Boolean);
+        leaseAddress = addrParts.join(", ");
+
+        // Move-in / move-out
+        const miISO = toISO(leaseDoc.moveInDate);
+        const moISO = toISO(leaseDoc.moveOutDate);
+        moveInDisplay = miISO
+          ? new Date(miISO).toLocaleDateString(undefined, {
+              month: "short",
+              day: "numeric",
+              year: "numeric",
+            })
+          : "";
+        moveOutDisplay = moISO
+          ? new Date(moISO).toLocaleDateString(undefined, {
+              month: "short",
+              day: "numeric",
+              year: "numeric",
+            })
+          : "";
+
+        // Monthly rent (cents)
+        if (leaseDoc.monthlyRent != null) {
+          monthlyRentDisplay = moneyFromCents(leaseDoc.monthlyRent);
+        }
       }
-      trace.leaseDocFound = true;
     }
   } catch {
-    // Non-fatal; just omit address/tenants if lookup fails
+    // Non-fatal; just omit address/lease meta if lookup fails
   }
+
+  // Pull firm details from FirmDoc using inspection.firmId
+  let firmName = "";
+  try {
+    if (firmId) {
+      const firmsCol = db.collection("FirmDoc") as any;
+      const firmDoc = await firmsCol.findOne({ _id: firmId });
+      if (firmDoc) {
+        firmName = firmDoc.name || "";
+        trace.firmDocFound = true;
+      }
+    }
+  } catch {
+    // Non-fatal; landlordRef will still show the firmId
+  }
+
+  const landlordSignatureLine = firmName
+    ? `An agent of ${firmName}`
+    : "An authorized agent of the landlord";
+
+  // Household / tenant names based on household_memberships + users
+  let householdTenantNames = "";
+  try {
+    // Prefer an explicit inspection.householdId, fall back to the lease document’s householdId
+    const rawHouseholdId =
+      (inspection.householdId && String(inspection.householdId)) ||
+      leaseHouseholdId ||
+      null;
+
+    trace.householdIdRaw = rawHouseholdId;
+
+    if (rawHouseholdId) {
+      const householdIdString = String(rawHouseholdId);
+
+      const membershipsCol = db.collection("household_memberships") as any;
+      const usersCol = db.collection("users") as any;
+
+      // In your samples, household_memberships.householdId is a plain string,
+      // so we query directly by string
+      const memberships = await membershipsCol
+        .find({ householdId: householdIdString, active: true })
+        .toArray();
+
+      trace.householdId = householdIdString;
+      trace.membershipCount = memberships.length;
+      trace.membershipSample = memberships
+        .slice(0, 3)
+        .map((m: any) => ({ _id: m._id, userId: m.userId, email: m.email, role: m.role }));
+
+      if (!memberships.length) {
+        // No members, we just leave householdTenantNames empty and fall back to the blank line
+        throw new Error("no_active_memberships_for_household");
+      }
+
+      const userIdStrings = memberships
+        .map((m: any) => (m.userId ? String(m.userId) : null))
+        .filter(Boolean) as string[];
+
+      trace.userIdStrings = userIdStrings;
+
+      // Your users._id is an ObjectId, your membership.userId is a string of that ObjectId’s hex,
+      // so we convert them to ObjectIds here
+      const userObjectIds = userIdStrings
+        .map((id) => toMaybeObjectId(id))
+        .filter((id): id is ObjectId => !!id);
+
+      trace.userObjectIds = userObjectIds.map((id) => id.toHexString());
+
+      const users = userObjectIds.length
+        ? await usersCol
+            .find({ _id: { $in: userObjectIds } })
+            .toArray()
+        : [];
+
+      trace.userCount = users.length;
+      trace.userSample = users
+        .slice(0, 3)
+        .map((u: any) => ({
+          _id: u._id,
+          legal_name: u.legal_name,
+          preferredName: u.preferredName,
+          name: u.name,
+          email: u.email,
+        }));
+
+      const names = users
+        .map((u: any) => {
+          return (
+            u.legal_name ||
+            u.preferredName ||
+            u.name ||
+            u.email ||
+            null
+          );
+        })
+        .filter(Boolean) as string[];
+
+      if (names.length) {
+        householdTenantNames = names.join(", ");
+      }
+    }
+  } catch (err) {
+    trace.householdError = String(
+      err instanceof Error ? err.message : err,
+    );
+  }
+
+  const tenantSectionHtml = householdTenantNames
+    ? `<div class="row">
+         <span class="label">Household / Tenants (informational)</span>
+         <div style="font-size:13px;color:#111827;margin-top:2px;">
+           The household consisting of ${esc(
+             householdTenantNames,
+           )} is expected to occupy the premises for this tenancy, however, if there is any difference between this list and the signed lease, the lease and its named tenants control.
+         </div>
+       </div>`
+    : `<div class="row"><span class="label">Tenant(s)</span>____________________________</div>`;
 
   const inner = `
 <p id="ma-statement-notice">${esc(statutoryNotice)}</p>
@@ -377,7 +557,7 @@ export async function GET(req: Request, ctx: any) {
 <p class="muted">
   Prepared on ${esc(statementDateDisplay)} for lease ${esc(
     leaseRef,
-  )}. This separate written statement describes the present condition of the premises at the start of the tenancy.
+  )}, This separate written statement describes the present condition of the premises at the start of the tenancy,
 </p>
 
 <hr/>
@@ -390,6 +570,20 @@ export async function GET(req: Request, ctx: any) {
     <div class="row"><span class="label">Inspection Status</span>${esc(
       statusRef,
     )}</div>
+    ${
+      moveInDisplay
+        ? `<div class="row"><span class="label">Move-in Date</span>${esc(
+            moveInDisplay,
+          )}</div>`
+        : ""
+    }
+    ${
+      monthlyRentDisplay
+        ? `<div class="row"><span class="label">Monthly Rent</span>${esc(
+            monthlyRentDisplay,
+          )}</div>`
+        : ""
+    }
   </div>
   <div class="box">
     <div class="row"><span class="label">Firm / Landlord Id</span>${esc(
@@ -398,6 +592,13 @@ export async function GET(req: Request, ctx: any) {
     <div class="row"><span class="label">Inspector Id</span>${esc(
       inspectorRef,
     )}</div>
+    ${
+      moveOutDisplay
+        ? `<div class="row"><span class="label">Move-out Date</span>${esc(
+            moveOutDisplay,
+          )}</div>`
+        : ""
+    }
   </div>
 </div>
 
@@ -408,9 +609,7 @@ export async function GET(req: Request, ctx: any) {
     }</div>
   </div>
   <div class="box">
-    <div class="row"><span class="label">Tenant(s)</span>${
-      tenantNames ? esc(tenantNames) : "____________________________"
-    }</div>
+    ${tenantSectionHtml}
   </div>
 </div>
 
@@ -422,16 +621,20 @@ ${conditionHtml}
     <div class="row">
       <span class="label">Landlord / Agent Certification</span>
       <div class="muted" style="font-size:11px;margin-top:4px;">
-        I certify under pains and penalties of perjury that this Statement of Condition is, to the best of my knowledge, true, accurate, and complete as of the date signed.
+        I certify under pains and penalties of perjury that this Statement of Condition is, to the best of my knowledge, true, accurate, and complete as of the date signed,
       </div>
     </div>
     <div class="row" style="margin-top:12px;">
       <span class="label">Landlord / Agent Signature</span>
-      <div class="sigline"></div>
+      <div style="margin-top:4px;font-size:13px;color:#111827;">
+        ${esc(landlordSignatureLine)}
+      </div>
     </div>
     <div class="row">
       <span class="label">Date</span>
-      <div class="sigline"></div>
+      <div style="margin-top:4px;font-size:13px;color:#111827;">
+        ${esc(landlordSignatureDateDisplay)}
+      </div>
     </div>
   </div>
   <div class="box">
@@ -441,7 +644,7 @@ ${conditionHtml}
 </div>
 
 <p class="note" style="margin-top:18px">
-  Tenant: if you believe this statement is incomplete or inaccurate, you may attach your own signed list of additional damage or defects that you believe exist, and return both this form and your list to the landlord within fifteen (15) days after you receive this statement or move in, whichever is later.
+  Tenant, if you believe this statement is incomplete or inaccurate, you may attach your own signed list of additional damage or defects that you believe exist, and return both this form and your list to the landlord within fifteen (15) days after you receive this statement or move in, whichever is later,
 </p>
 
 ${appendixHtml}
