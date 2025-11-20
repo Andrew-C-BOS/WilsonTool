@@ -3,6 +3,7 @@ import * as bcrypt from "bcryptjs";
 import { SignJWT, jwtVerify } from "jose";
 import { cookies } from "next/headers";
 import { getDb } from "./db";
+import { ObjectId } from "mongodb";
 
 const COOKIE = "milo_auth";
 const ALG = "HS256";
@@ -14,7 +15,18 @@ export type SessionUser = {
   _id: string;
   email: string;
   role: Role;
-  isAdmin: boolean; // derived from role === "admin" or DB flag/allow-list
+  isAdmin: boolean;
+
+  // New, only populated for landlords
+  landlordFirm?: {
+    membershipId: string;
+    firmId: string;
+    role?: string | null;
+	firmRole?: string | null; 
+    department?: string | null;
+    title?: string | null;
+    active: boolean;
+  } | null;
 };
 
 // Optional allow-list for bootstrap
@@ -150,11 +162,65 @@ export async function getSessionUser(): Promise<SessionUser | null> {
     const { payload } = await jwtVerify(token, key(), { algorithms: [ALG] });
     const u = payload as any;
 
-    // Re-derive admin on every read so old tokens upgrade automatically
+    // ── admin re-derivation ───────────────────────────────
     let isAdmin = computeIsAdmin({ email: u.email, role: u.role, isAdmin: u.isAdmin });
     if (!isAdmin && u?.email) {
       const doc = await findUserByEmail(String(u.email));
       isAdmin = computeIsAdmin({ email: u.email, role: u.role as Role, isAdmin: doc?.isAdmin });
+    }
+
+    let landlordFirm: SessionUser["landlordFirm"] = null;
+
+    // ── only landlords have firm memberships ──────────────
+    if (u.role === "landlord" && u._id) {
+      try {
+        const db = await getDb();
+        const firmMemberships = db.collection("firm_memberships");
+
+        // Be tolerant: try ObjectId if valid, otherwise string, and OR them,
+        // in case some docs are stored as ObjectId and others as plain string
+        const rawId = String(u._id);
+        const or: any[] = [{ userId: rawId }];
+
+        if (ObjectId.isValid(rawId)) {
+          or.unshift({ userId: new ObjectId(rawId) });
+        }
+
+        const membership = await firmMemberships.findOne(
+          {
+            active: true,
+            $or: or,
+          },
+          {
+            sort: { createdAt: 1 }, // consistent primary membership
+          },
+        );
+
+        // Debug logging to see what’s actually happening:
+        if (!membership) {
+          console.log("[getSessionUser] landlord firm membership not found,", {
+            userIdFromToken: rawId,
+          });
+        } else {
+          console.log("[getSessionUser] landlord firm membership found,", {
+            membershipId: String(membership._id),
+            firmId: membership.firmId,
+            role: membership.role,
+            department: membership.department,
+          });
+
+          landlordFirm = {
+            membershipId: String(membership._id),
+            firmId: String(membership.firmId),
+            firmRole: membership.role ?? null,
+            department: membership.department ?? null,
+            title: membership.title ?? null,
+            active: Boolean(membership.active),
+          };
+        }
+      } catch (err) {
+        console.error("[getSessionUser] firm lookup failed,", err);
+      }
     }
 
     return {
@@ -162,12 +228,13 @@ export async function getSessionUser(): Promise<SessionUser | null> {
       email: String(u.email),
       role: u.role as Role,
       isAdmin,
+      landlordFirm,
     };
-  } catch {
+  } catch (err) {
+    console.error("[getSessionUser] token verify failed,", err);
     return null;
   }
 }
-
 /* ---------------- Tiny helpers ---------------- */
 
 export function isAppAdmin(u: SessionUser | null | undefined): u is SessionUser & { isAdmin: true } {

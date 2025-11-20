@@ -1,4 +1,3 @@
-// app/tenant/household/HouseholdRouter.tsx
 "use client";
 
 import dynamic from "next/dynamic";
@@ -39,14 +38,18 @@ type HouseholdRouterProps = {
   state: HouseholdState;
 };
 
-// Props passed to Desktop + Mobile variants
-type HouseholdViewProps = {
+// Props passed to Desktop + Mobile variants and the wizards
+export type HouseholdViewProps = {
   cluster: HouseholdCluster;
   user: SessionUser;
   state: HouseholdState;
+  currentUserEmail?: string | null;
 };
 
-// Dynamically loaded views, explicitly typed with props
+/* ─────────────────────────────────────────────────────────────
+   Views
+───────────────────────────────────────────────────────────── */
+
 const HouseholdDesktop = dynamic<HouseholdViewProps>(
   () => import("./HouseholdDesktop"),
   {
@@ -71,6 +74,30 @@ const HouseholdMobile = dynamic<HouseholdViewProps>(
   },
 );
 
+const HouseholdWizard = dynamic<HouseholdViewProps>(
+  () => import("./HouseholdWizard"),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="px-4 text-sm text-gray-600">
+        Loading setup wizard…
+      </div>
+    ),
+  },
+);
+
+const HouseholdWizardMobile = dynamic<HouseholdViewProps>(
+  () => import("./HouseholdWizardMobile"),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="px-4 text-sm text-gray-600">
+        Loading setup wizard…
+      </div>
+    ),
+  },
+);
+
 export default function HouseholdRouter({ user, state }: HouseholdRouterProps) {
   const [isMobile, setIsMobile] = useState(false);
   const [mounted, setMounted] = useState(false);
@@ -78,6 +105,7 @@ export default function HouseholdRouter({ user, state }: HouseholdRouterProps) {
   const [cluster, setCluster] = useState<HouseholdCluster | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
+  // mount and media query
   useEffect(() => {
     setMounted(true);
 
@@ -98,15 +126,15 @@ export default function HouseholdRouter({ user, state }: HouseholdRouterProps) {
     }
   }, []);
 
+  // load household cluster once
   useEffect(() => {
-    // Fetch the household cluster
     const run = async () => {
       try {
         const res = await fetch("/api/tenant/household/cluster", {
           cache: "no-store",
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
+        const data = await fetchResultToJson(res);
         if (!data?.ok) throw new Error(data?.error || "load_failed");
         setCluster(data.cluster as HouseholdCluster);
       } catch (e: any) {
@@ -116,6 +144,15 @@ export default function HouseholdRouter({ user, state }: HouseholdRouterProps) {
     };
     run();
   }, []);
+
+  // helper to parse JSON safely (some environments require explicit .json())
+  async function fetchResultToJson(res: Response) {
+    try {
+      return await res.json();
+    } catch {
+      return null;
+    }
+  }
 
   if (!mounted) return null;
 
@@ -135,10 +172,47 @@ export default function HouseholdRouter({ user, state }: HouseholdRouterProps) {
     );
   }
 
-  // Pass `cluster`, plus server-provided `state` and `user`
+  const currentUserEmail = user.email ?? null;
+
+  // primary routing decision is now “are we in configure mode”
+  const isConfigure = state?.primaryKind === "configure_household";
+
+  if (isConfigure) {
+    // In setup mode, use mobile or desktop wizard depending on viewport
+    if (isMobile) {
+      return (
+        <HouseholdWizardMobile
+          cluster={cluster}
+          state={state}
+          user={user}
+          currentUserEmail={currentUserEmail}
+        />
+      );
+    }
+    return (
+      <HouseholdWizard
+        cluster={cluster}
+        state={state}
+        user={user}
+        currentUserEmail={currentUserEmail}
+      />
+    );
+  }
+
+  // non-configure states still fan out to desktop vs mobile
   return isMobile ? (
-    <HouseholdMobile cluster={cluster} state={state} user={user} />
+    <HouseholdMobile
+      cluster={cluster}
+      state={state}
+      user={user}
+      currentUserEmail={currentUserEmail}
+    />
   ) : (
-    <HouseholdDesktop cluster={cluster} state={state} user={user} />
+    <HouseholdDesktop
+      cluster={cluster}
+      state={state}
+      user={user}
+      currentUserEmail={currentUserEmail}
+    />
   );
 }

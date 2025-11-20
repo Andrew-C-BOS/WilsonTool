@@ -527,6 +527,109 @@ export async function POST(req: Request) {
     });
 
     let pi: Stripe.PaymentIntent | null = null;
+if ((event.data.object as any)?.object === "setup_intent") {
+  const si = event.data.object as Stripe.SetupIntent;
+
+  const kind = si.metadata?.kind;
+  if (kind === "tenant_bank_link") {
+    const pmId =
+      typeof si.payment_method === "string"
+        ? si.payment_method
+        : null;
+    const customerId =
+      typeof si.customer === "string" ? si.customer : null;
+    const metaUserId = si.metadata?.userId as string | undefined;
+
+    dpush(debugMode ? debug : null, "setup_intent_bank_link", {
+      status: si.status,
+      pmId,
+      customerId,
+      metaUserId,
+    });
+
+    if (si.status === "succeeded" && pmId && customerId) {
+      const db = await getDb();
+      const users = db.collection("users") as any;
+
+      // Prefer looking up by our own userId metadata
+      let filter: any;
+      if (metaUserId) {
+        const { ObjectId } = await import("mongodb");
+        filter = ObjectId.isValid(metaUserId)
+          ? { _id: new ObjectId(metaUserId) }
+          : { _id: metaUserId };
+      } else {
+        // Fallback: try by stripeCustomerId
+        filter = { stripeCustomerId: customerId };
+      }
+
+      // Pull full PaymentMethod so we can store useful metadata
+      let pm: Stripe.PaymentMethod | null = null;
+      try {
+        pm = await stripe.paymentMethods.retrieve(pmId, {
+          expand: ["us_bank_account"],
+        });
+      } catch (err: any) {
+        dpush(
+          debugMode ? debug : null,
+          "setup_pm_retrieve_error",
+          err?.message || String(err),
+        );
+      }
+
+      const bank = pm?.us_bank_account || null;
+      const bankDoc = bank
+        ? {
+            id: pm!.id,
+            type: pm!.type,
+            last4: bank.last4 ?? null,
+            bankName: bank.bank_name ?? null,
+            accountType: bank.account_type ?? null,
+            stripeCustomerId: customerId,
+            createdAt: new Date(),
+          }
+        : {
+            id: pmId,
+            type: "us_bank_account",
+            last4: null,
+            bankName: null,
+            accountType: null,
+            stripeCustomerId: customerId,
+            createdAt: new Date(),
+          };
+
+      const userUpdateRes = await users.updateOne(
+        filter,
+        {
+          $set: {
+            stripeCustomerId: customerId,
+            defaultUsBankPaymentMethodId: pmId,
+          },
+          // Track all linked bank methods on the user; $addToSet avoids duplicates
+          $addToSet: {
+            bankPaymentMethods: bankDoc,
+          },
+        },
+      );
+
+      dpush(debugMode ? debug : null, "user_pm_linked_from_setup", {
+        pmId,
+        customerId,
+        filter,
+        matched: userUpdateRes.matchedCount,
+        modified: userUpdateRes.modifiedCount,
+        bankDoc,
+      });
+    }
+  }
+
+  return NextResponse.json({
+    ok: true,
+    note: "handled_setup_intent",
+    ...(debugMode ? { debug } : {}),
+  });
+}
+	
     if ((event.data.object as any)?.object === "payment_intent") {
       pi = event.data.object as Stripe.PaymentIntent;
     } else if ((event.data.object as any)?.object === "charge") {

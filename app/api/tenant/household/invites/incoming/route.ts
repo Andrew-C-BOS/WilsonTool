@@ -113,7 +113,7 @@ export async function GET(req: NextRequest) {
   if (!user) {
     return NextResponse.json(
       { ok: false, error: "not_authenticated" },
-      { status: 401 }
+      { status: 401 },
     );
   }
 
@@ -123,13 +123,14 @@ export async function GET(req: NextRequest) {
   if (!url.searchParams.get("me")) {
     return NextResponse.json(
       { ok: false, error: "unsupported_query" },
-      { status: 400 }
+      { status: 400 },
     );
   }
 
   const db = await getDb();
   const invitesCol = db.collection("household_invites");
   const householdsCol = db.collection("households");
+  const usersCol = db.collection("users"); // ← NEW
 
   // Who am I?
   const primaryEmail = String(user.email ?? "").toLowerCase();
@@ -137,7 +138,7 @@ export async function GET(req: NextRequest) {
     ? ((user as any).emails as string[]).map((e) => String(e).toLowerCase())
     : [];
   const emailSet = Array.from(
-    new Set([primaryEmail, ...emailAliases].filter(Boolean))
+    new Set([primaryEmail, ...emailAliases].filter(Boolean)),
   );
 
   // What household am I currently in (if any)?
@@ -168,25 +169,27 @@ export async function GET(req: NextRequest) {
     return hid !== currentHouseholdId;
   });
 
-  // Hydrate household display names in one pass
+ /* ---------------- Hydrate household names ---------------- */
+
   const householdIds = Array.from(
     new Set(
       filtered
         .map((r: any) => toStringId(r.householdId))
-        .filter(Boolean)
-    )
+        .filter(Boolean),
+    ),
   );
 
-  const householdDocs = householdIds.length
+  // Convert string ids to ObjectId, so the Mongo driver types are happy
+  const householdObjectIds = householdIds
+    .map((id) => toMaybeObjectId(id))
+    .filter((id): id is ObjectId => !!id);
+
+  const householdDocs = householdObjectIds.length
     ? await householdsCol
-        .find({
-          $or: householdIds.map((hid) => {
-            const obj = toMaybeObjectId(hid);
-            return obj ? { _id: obj } : { _id: hid as any };
-          }),
-        })
+        .find({ _id: { $in: householdObjectIds } })
         .toArray()
     : [];
+
 
   const householdNameById = new Map<string, string | null>();
   for (const hh of householdDocs) {
@@ -195,11 +198,46 @@ export async function GET(req: NextRequest) {
     householdNameById.set(key, name);
   }
 
+  /* ---------------- Hydrate inviter info ---------------- */
+
+  const creatorIds = Array.from(
+    new Set(
+      filtered
+        .map((r: any) => (r.createdBy ? toStringId(r.createdBy) : null))
+        .filter(Boolean) as string[],
+    ),
+  );
+
+  const userDocs = creatorIds.length
+    ? await usersCol
+        .find({
+          $or: creatorIds.map((uid) => {
+            const obj = toMaybeObjectId(uid);
+            return obj ? { _id: obj } : ({ _id: uid } as any);
+          }),
+        })
+        .toArray()
+    : [];
+
+  const inviterById = new Map<
+    string,
+    { email: string | null; preferredName: string | null }
+  >();
+  for (const u of userDocs) {
+    const key = toStringId(u._id);
+    const email = (u.email as string | undefined) ?? null;
+    const preferredName = (u.preferredName as string | undefined) ?? null;
+    inviterById.set(key, { email, preferredName });
+  }
+
+  /* ---------------- Shape response ---------------- */
+
   const invites = filtered.map((r: any) => {
     const hid = toStringId(r.householdId);
-    const householdName =
-      householdNameById.get(hid) ??
-      null;
+    const householdName = householdNameById.get(hid) ?? null;
+
+    const creatorId = r.createdBy ? toStringId(r.createdBy) : null;
+    const inviter = creatorId ? inviterById.get(creatorId) : undefined;
 
     return {
       id: toStringId(r._id),
@@ -214,6 +252,11 @@ export async function GET(req: NextRequest) {
         r.expiresAt instanceof Date
           ? r.expiresAt.toISOString()
           : new Date(r.expiresAt ?? Date.now()).toISOString(),
+
+      // NEW: who invited me?
+      inviterEmail: inviter?.email ?? null,
+      inviterName: inviter?.preferredName ?? null,
+
       // NOTE: we intentionally do NOT return the invite code here,
       // because only the hash is stored (codeHash) and SHA-256 is one-way.
       // The user can still join via the secure link in their email.

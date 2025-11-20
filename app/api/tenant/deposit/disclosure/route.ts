@@ -25,7 +25,10 @@ function toObjectIdMaybe(id: string): ObjectId | null {
 export async function GET(req: Request) {
   const user = await getSessionUser();
   if (!user) {
-    return NextResponse.json({ ok: false, error: "not_authenticated" }, { status: 401 });
+    return NextResponse.json(
+      { ok: false, error: "not_authenticated" },
+      { status: 401 },
+    );
   }
 
   const url = new URL(req.url);
@@ -33,35 +36,45 @@ export async function GET(req: Request) {
   const firmId = url.searchParams.get("firmId") || "";
 
   if (!appIdParam || !firmId) {
-    return NextResponse.json({ ok: false, error: "missing_params" }, { status: 400 });
+    return NextResponse.json(
+      { ok: false, error: "missing_params" },
+      { status: 400 },
+    );
   }
 
   const db = await getDb();
 
-  // --- Application lookup: support _id stored as ObjectId (canonical) or string (defensive) ---
-	const appIdObj = toObjectIdMaybe(appIdParam);
-
-	const app = await db.collection("applications").findOne(
-	  {
-		$or: [
-		  { _id: appIdParam as any }, // string id (if stored as string)
-		  ...(appIdObj ? [{ _id: appIdObj }] : []), // ObjectId
-		],
-	  } as any
-	);
+  // --- Application lookup: support _id stored as ObjectId or string ---
+  const appIdObj = toObjectIdMaybe(appIdParam);
+  const app = await db.collection("applications").findOne(
+    {
+      $or: [
+        { _id: appIdParam as any }, // string id (if stored as string)
+        ...(appIdObj ? [{ _id: appIdObj }] : []), // ObjectId
+      ],
+    } as any,
+  );
 
   if (!app) {
-    return NextResponse.json({ ok: false, error: "application_not_found" }, { status: 404 });
+    return NextResponse.json(
+      { ok: false, error: "application_not_found" },
+      { status: 404 },
+    );
   }
 
-  // --- Firm lookup (your firmId is a string like "firm_...") ---
+  // --- Firm lookup (firmId is a string like "firm_...") ---
   const firm = await db.collection("firms").findOne({ _id: firmId as any });
   if (!firm) {
-    return NextResponse.json({ ok: false, error: "firm_not_found" }, { status: 404 });
+    return NextResponse.json(
+      { ok: false, error: "firm_not_found" },
+      { status: 404 },
+    );
   }
 
-  // --- Payment lookup: support payments.appId stored as string OR ObjectId ---
-  const payment = await db.collection("payments").findOne(
+  // --- Deposit payments: sum across ALL succeeded deposits for this app+firm ---
+const deposits = await db
+  .collection("payments")
+  .find(
     {
       kind: "deposit",
       status: "succeeded",
@@ -71,24 +84,51 @@ export async function GET(req: Request) {
         ...(appIdObj ? [{ appId: appIdObj }] : []),
       ],
     },
-    { sort: { succeededAt: -1, updatedAt: -1, createdAt: -1 } }
+    {
+      sort: {
+        succeededAt: -1,
+        updatedAt: -1,
+        createdAt: -1,
+      },
+    },
+  )
+  .toArray();
+
+const paid = deposits.length > 0;
+
+// This is the key line: sum *all* succeeded deposit payments.
+const totalAmountCents = deposits.reduce(
+  (sum, p) => sum + (Number(p.amountCents) || 0),
+  0,
+);
+
+// latest payment drives id / date / receipt
+const latestPayment = deposits[0] || null;
+  const createdAtISO = toISO(
+    latestPayment?.succeededAt ??
+      latestPayment?.updatedAt ??
+      latestPayment?.createdAt,
   );
+  const bankReceiptDueISO = createdAtISO
+    ? addDaysISO(createdAtISO, 30)
+    : null;
+
+  const receiptPath = latestPayment
+    ? `/api/receipts/security-deposit/${String(latestPayment._id)}`
+    : null;
 
   const escrow = firm.escrowDisclosure ?? {};
-  const escrowPresent = Boolean(escrow.bankName && (escrow.accountIdentifier || escrow.accountLast4));
-
-  const paid = Boolean(payment);
-  const createdAtISO = toISO(payment?.createdAt);
-  const bankReceiptDueISO = createdAtISO ? addDaysISO(createdAtISO, 30) : null;
-
-  const receiptPath = payment ? `/api/receipts/security-deposit/${String(payment._id)}` : null;
+  const escrowPresent = Boolean(
+    escrow.bankName &&
+      (escrow.accountIdentifier || escrow.accountLast4),
+  );
 
   return NextResponse.json({
     ok: true,
     paid,
-    paymentId: payment ? String(payment._id) : null,
-    amountCents: payment?.amountCents ?? null,
-    currency: payment?.currency ?? "USD",
+    paymentId: latestPayment ? String(latestPayment._id) : null,
+    amountCents: paid ? totalAmountCents : null,
+    currency: latestPayment?.currency ?? "USD",
     bankReceiptDueISO,
     disclosureReady: paid && escrowPresent,
     receiptPath,
@@ -97,7 +137,10 @@ export async function GET(req: Request) {
       bankAddress: escrow.bankAddress ?? null,
       accountIdentifier: escrow.accountIdentifier ?? null,
       accountLast4: escrow.accountLast4 ?? null,
-      interestRate: typeof escrow.interestRate === "number" ? escrow.interestRate : null,
+      interestRate:
+        typeof escrow.interestRate === "number"
+          ? escrow.interestRate
+          : null,
     },
   });
 }

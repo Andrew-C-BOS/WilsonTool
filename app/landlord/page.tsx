@@ -1,8 +1,21 @@
 // app/landlord/page.tsx
 import { getSessionUser } from "@/lib/auth";
+import { redirect } from "next/navigation";
 
 export default async function LandlordHome() {
   const user = await getSessionUser();
+  if (!user || user.role !== "landlord") {
+    redirect("/");
+  }
+  const firmRole =
+    (user.landlordFirm as any)?.firmRole ??
+    user.landlordFirm?.role ??
+    null;
+
+  // If landlord is an inspector, land them on the inspection tool
+  if (firmRole === "inspector") {
+    redirect("/landlord/inspection");
+  }
   return (
     <>
       <h1 className="text-xl font-semibold">Landlord dashboard</h1>

@@ -7,17 +7,23 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-export default function Page({
+export default async function Page({
   params,
   searchParams,
 }: {
-  params: { id?: string | string[] };
-  searchParams?: { firmId?: string };
+  params: Promise<{ id?: string | string[] }>;
+  searchParams?: Promise<{ firmId?: string }>;
 }) {
-  const raw = params?.id;
+  // Unwrap the promises
+  const { id: raw } = await params;
+  const sp = searchParams ? await searchParams : undefined;
+
   const leaseId = Array.isArray(raw) ? raw[0] : raw;
-  if (!leaseId || leaseId === "undefined") notFound();
-  const firmId = searchParams?.firmId;
+  if (!leaseId || leaseId === "undefined") {
+    notFound();
+  }
+
+  const firmId = sp?.firmId;
 
   return (
     <Suspense fallback={<div className="px-6 py-8 text-sm text-gray-600">Loading lease…</div>}>

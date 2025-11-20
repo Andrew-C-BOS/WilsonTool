@@ -484,6 +484,7 @@ export default function AdminPanel() {
                 <option value="member">member</option>
                 <option value="admin">admin</option>
                 <option value="owner">owner</option>
+				<option value="inspector">inspector</option>
               </Select>
             </div>
             <div>

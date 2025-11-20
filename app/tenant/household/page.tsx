@@ -23,7 +23,7 @@ export default async function HouseholdPage() {
   });
 
   return (
-    <div className="min-h-screen bg-gray-50 mx-0">
+    <div className="min-h-[calc(100vh-4rem)] bg-gray-50 mx-0">
       <Suspense fallback={<div className="px-4 text-sm text-gray-600">Loading…</div>}>
         <HouseholdRouter
           user={{ email: user.email }}

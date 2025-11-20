@@ -1,11 +1,16 @@
+// app/landlord/components/LandlordNavBar.tsx
 "use client";
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState, useEffect, useRef } from "react";
-import LogoutButton from "./LogoutButton"; // ← add this import
+import LogoutButton from "./LogoutButton";
 
-export default function LandlordNavBar() {
+type Props = {
+  isInspector?: boolean;
+};
+
+export default function LandlordNavBar({ isInspector }: Props) {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
   const panelRef = useRef<HTMLDivElement | null>(null);
@@ -38,23 +43,83 @@ export default function LandlordNavBar() {
     };
   }, [mobileOpen]);
 
+  /* ─────────────────────────────────────────────
+     Inspector-only variant
+  ───────────────────────────────────────────── */
+  if (isInspector) {
+    const inspectionHref = "/landlord/inspection";
+    const inspectionActive =
+      pathname === inspectionHref || pathname.startsWith(inspectionHref + "/");
+
+    return (
+      <nav className="w-full border-b border-gray-200 bg-white">
+        <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
+          {/* Brand */}
+          <Link
+            href={inspectionHref}
+            className="text-lg font-semibold text-gray-900"
+          >
+            MILO Inspector
+          </Link>
+
+          {/* Desktop right side */}
+          <div className="hidden items-center gap-4 md:flex">
+            <LogoutButton />
+          </div>
+
+          {/* Mobile menu button */}
+          <div className="md:hidden">
+            <button
+              onClick={() => setMobileOpen((v) => !v)}
+              className="inline-flex items-center justify-center rounded-md border border-gray-300 px-3 py-2 text-gray-700 hover:bg-gray-50"
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24">
+                <path
+                  d="M4 6h16M4 12h16M4 18h16"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                />
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        {/* Mobile menu */}
+        {mobileOpen && (
+          <div
+            ref={panelRef}
+            className="space-y-1 border-t border-gray-200 bg-white px-2 pb-3 md:hidden"
+          >
+            <div className="border-t border-gray-100 pt-2">
+              <LogoutButton />
+            </div>
+          </div>
+        )}
+      </nav>
+    );
+  }
+
+  /* ─────────────────────────────────────────────
+     Default landlord navbar
+  ───────────────────────────────────────────── */
   return (
     <nav className="w-full border-b border-gray-200 bg-white">
-      <div className="mx-auto max-w-7xl flex items-center justify-between h-14 px-4 sm:px-6 lg:px-8">
+      <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
         {/* Brand */}
         <Link href="/landlord" className="text-lg font-semibold text-gray-900">
           MILO Landlord
         </Link>
 
         {/* Desktop links */}
-        <div className="hidden md:flex items-center gap-6">
+        <div className="hidden items-center gap-6 md:flex">
           {links.map((l) => (
             <Link
               key={l.href}
               href={l.href}
               className={`text-sm transition ${
                 isActive(l.href)
-                  ? "text-gray-900 font-medium"
+                  ? "font-medium text-gray-900"
                   : "text-gray-600 hover:text-gray-900"
               }`}
             >
@@ -62,7 +127,6 @@ export default function LandlordNavBar() {
             </Link>
           ))}
 
-          {/* Logout on desktop */}
           <LogoutButton />
         </div>
 
@@ -88,7 +152,7 @@ export default function LandlordNavBar() {
       {mobileOpen && (
         <div
           ref={panelRef}
-          className="md:hidden border-t border-gray-200 bg-white px-2 pb-3 space-y-1"
+          className="space-y-1 border-t border-gray-200 bg-white px-2 pb-3 md:hidden"
         >
           {links.map((l) => (
             <Link
@@ -96,7 +160,7 @@ export default function LandlordNavBar() {
               href={l.href}
               className={`block rounded-md px-3 py-2 text-base transition ${
                 isActive(l.href)
-                  ? "bg-gray-100 text-gray-900 font-medium"
+                  ? "bg-gray-100 font-medium text-gray-900"
                   : "text-gray-700 hover:bg-gray-50"
               }`}
               onClick={() => setMobileOpen(false)}
@@ -104,7 +168,6 @@ export default function LandlordNavBar() {
               {l.label}
             </Link>
           ))}
-          {/* Logout on mobile */}
           <div className="border-t border-gray-100 pt-2">
             <LogoutButton />
           </div>
